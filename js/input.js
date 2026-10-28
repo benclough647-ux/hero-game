@@ -33,10 +33,12 @@ export class Input {
       cancel: k('KeyE') || b(1) || b(2),
       switch: k('Tab') || k('KeyQ') || b(3),
       any: b(0) || b(9),
+      hud: k('KeyH') || b(8),
+      quality: k('KeyG'),
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'switch', 'any']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }

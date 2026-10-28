@@ -1,46 +1,61 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Input } from './input.js';
-import { City } from './city.js';
+import { City, BLOCK, HALF, WATER_Y } from './city.js';
+import { World } from './world.js';
+import { Traffic } from './traffic.js';
 import { Hero } from './heroes.js';
 import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
+import { QualityManager } from './quality.js';
 
-const VIEW = 1500;
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)); renderer.setSize(innerWidth, innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace; document.body.prepend(renderer.domElement);
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: /shot/.test(location.search) });
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.75;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
-const skyCol = new THREE.Color(0x9cc8ec); scene.background = skyCol; scene.fog = new THREE.Fog(0xb4d2ea, 250, VIEW);
-// sky dome gradient
-{ const g = new THREE.SphereGeometry(4000, 24, 12); const c = []; const p = g.attributes.position;
-  const top = new THREE.Color(0x3d7cc9), hor = new THREE.Color(0xc8def0);
-  for (let i = 0; i < p.count; i++) { const t = Math.max(0, p.getY(i) / 4000); const col = hor.clone().lerp(top, Math.pow(t, 0.6)); c.push(col.r, col.g, col.b); }
-  g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3));
-  const sky = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
-  scene.add(sky); scene.userData.sky = sky;
-  const sun = new THREE.Mesh(new THREE.SphereGeometry(80, 16, 12), new THREE.MeshBasicMaterial({ color: 0xfff4d0, fog: false })); sun.position.set(1500, 1800, -2500); sky.add(sun); }
-scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x4a4438, 1.1));
-const dl = new THREE.DirectionalLight(0xfff0d8, 1.6); dl.position.set(0.5, 1, -0.7); scene.add(dl);
-
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.3, 5000);
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.25, 9000);
+const world = new World(scene, renderer);
 const city = new City(scene);
+const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
 let idx = 0; heroes[1].setVisible(false);
-const spawn = new THREE.Vector3(-BLOCKOFF(), 0, -BLOCKOFF()); function BLOCKOFF() { return 311; }
-heroes[0].pos.copy(spawn);
+heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 const input = new Input(renderer.domElement), cam = new ThirdPersonCamera(camera), hud = new HUD();
-// blob shadow
-const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.8, 20), new THREE.MeshBasicMaterial({ color: 0, transparent: true, opacity: 0.35, depthWrite: false }));
-shadow.rotation.x = -Math.PI / 2; scene.add(shadow);
+
+// post-processing: HDR render -> subtle bloom -> ACES tone map + sRGB
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.22, 0.5, 1.0); composer.addPass(bloom);
+composer.addPass(new OutputPass());
+let usePost = true, view = 1700;
+function resize() {
+  const p = quality ? quality.preset.pixel : 1, pr = Math.min(devicePixelRatio, 1.25) * p;
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight);
+  bloom.setSize(innerWidth * pr / 2, innerHeight * pr / 2);
+}
+let quality = null;
+quality = new QualityManager(q => {
+  usePost = q.post; view = q.view; world.setQuality(q);
+  for (const rt of [composer.renderTarget1, composer.renderTarget2]) { if (rt.samples !== q.msaa) { rt.samples = q.msaa; rt.dispose(); } }
+  city.treeMesh.castShadow = q.shadow >= 2048; traffic.body.castShadow = q.shadow >= 1024;
+  scene.fog.density = 0.00042 * 1700 / q.view;
+  if (quality) resize();
+});
+resize(); addEventListener('resize', resize);
 
 const start = document.getElementById('start'); let started = false;
 const begin = () => { started = true; start.style.display = 'none'; };
 start.addEventListener('click', () => { begin(); renderer.domElement.requestPointerLock?.(); });
 renderer.domElement.addEventListener('click', () => { if (started && !document.pointerLockElement) renderer.domElement.requestPointerLock?.(); });
-addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
@@ -49,22 +64,34 @@ function switchHero() {
 }
 
 const clock = new THREE.Clock();
+let paused = false;
+function render() { if (usePost) composer.render(); else renderer.render(scene, camera); }
 function frame() {
   requestAnimationFrame(frame);
-  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (paused) return;
+  const raw = clock.getDelta(), dt = Math.min(raw, 1 / 20);
   const inp = input.update(dt);
-  if (!started) { if (inp.anyPressed) begin(); else { renderer.render(scene, camera); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, heroes[idx], city); return; } }
-  if (inp.switchPressed) switchHero();
+  if (inp.hudPressed) hud.toggle();
+  if (inp.qualityPressed) hud.say('Graphics: ' + quality.cycle());
   const h = heroes[idx];
-  h.update(dt, inp, cam, city);
-  cam.update(dt, inp, h, city);
-  fx.update(dt);
-  const fh = city.heightAt(h.pos.x, h.pos.z);
-  shadow.position.set(h.pos.x, fh + 0.08, h.pos.z); const hgt = h.pos.y - fh; shadow.material.opacity = 0.35 * Math.max(0, 1 - hgt / 40); shadow.scale.setScalar(h.def.height / 1.83 * (1 + hgt * 0.01));
-  scene.userData.sky.position.copy(camera.position);
-  city.update(camera.position, VIEW);
-  hud.update(h, inp.hasPad);
-  renderer.render(scene, camera);
+  if (!started) { if (inp.anyPressed) begin(); else { cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); } }
+  else {
+    if (inp.switchPressed) switchHero();
+    heroes[idx].update(dt, inp, cam, city); cam.update(dt, inp, heroes[idx], city);
+  }
+  step(dt, raw);
+}
+function step(dt, raw, noRender) {
+  const h = heroes[idx];
+  if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
+  fx.update(dt); traffic.update(dt);
+  world.update(dt, camera, h.pos);
+  city.update(camera.position, view);
+  const msg = quality.sample(raw); if (msg) hud.say(msg);
+  hud.update(h, input.state.hasPad, dt, ` · ${quality.preset.name}`);
+  if (!noRender) render();
 }
 frame();
-window.__game = { heroes, city, cam, get active() { return heroes[idx]; }, switchHero, input, renderer };
+// debug/screenshot hook
+window.__game = { heroes, city, cam, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
+  setPaused(v) { paused = v; }, scene, THREE };
