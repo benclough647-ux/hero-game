@@ -4,8 +4,9 @@ export class ThirdPersonCamera {
   constructor(cam) {
     this.cam = cam; this.yaw = Math.PI; this.pitch = 0.06; this.dist = 5; this.fov = 62; this.t = 0;
     this.forward = new THREE.Vector3(); this.flatForward = new THREE.Vector3(); this.right = new THREE.Vector3();
-    this.target = new THREE.Vector3(); this.inited = false; this.computeAxes();
+    this.target = new THREE.Vector3(); this.inited = false; this.shakeAmt = 0; this.computeAxes();
   }
+  shake(a) { this.shakeAmt = Math.min(1.2, this.shakeAmt + a); }
   get yawFacing() { return this.yaw; }
   computeAxes() {
     const cp = Math.cos(this.pitch);
@@ -37,5 +38,6 @@ export class ThirdPersonCamera {
     // subtle speed shake (layered sines, no randomness so it stays smooth)
     const sh = Math.min(1, Math.max(0, (sp - 40) / 260)) * 0.006, t = this.t;
     this.cam.rotation.x += (Math.sin(t * 31) + Math.sin(t * 17.3) * 0.6) * sh; this.cam.rotation.y += (Math.sin(t * 27.1) + Math.sin(t * 13.7) * 0.5) * sh;
+    if (this.shakeAmt > 0.001) { const k = this.shakeAmt * 0.035; this.cam.rotation.x += (Math.random() - 0.5) * k; this.cam.rotation.y += (Math.random() - 0.5) * k; this.cam.position.y += (Math.random() - 0.5) * k * 4; this.shakeAmt *= Math.exp(-dt * 6); }
   }
 }

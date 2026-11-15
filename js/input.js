@@ -9,6 +9,7 @@ export class Input {
     addEventListener('blur', () => this.keys.clear());
     addEventListener('mousemove', e => { if (document.pointerLockElement) { this.mouseDX += e.movementX; this.mouseDY += e.movementY; } });
     addEventListener('mousedown', e => this.mouseBtn.add(e.button));
+    addEventListener('contextmenu', e => e.preventDefault());
     addEventListener('mouseup', e => this.mouseBtn.delete(e.button));
     this.dom = dom;
   }
@@ -28,9 +29,12 @@ export class Input {
       lookX: this.mouseDX * 0.0025 + ax(2) * 3.2 * dt,
       lookY: this.mouseDY * 0.0025 + ax(3) * 2.4 * dt,
       jump: k('Space') || b(0),
-      boost: Math.max(k('ShiftLeft') || k('ShiftRight') ? 1 : 0, bv(7), this.mouseBtn.has(0) && document.pointerLockElement ? 1 : 0),
-      descend: Math.max(k('KeyC') || k('ControlLeft') ? 1 : 0, bv(6)),
-      cancel: k('KeyE') || b(1) || b(2),
+      boost: Math.max(k('ShiftLeft') || k('ShiftRight') ? 1 : 0, b(5) ? 1 : 0),
+      descend: Math.max(k('KeyC') || k('ControlLeft') ? 1 : 0, b(4) ? 1 : 0),
+      blast: k('KeyF') || bv(7) > 0.5 || (this.mouseBtn.has(0) && !!document.pointerLockElement),
+      tackle: k('KeyR') || bv(6) > 0.5 || (this.mouseBtn.has(2) && !!document.pointerLockElement),
+      punch: k('KeyX') || k('KeyV') || b(2),
+      cancel: k('KeyE') || b(1),
       switch: k('Tab') || k('KeyQ') || b(3),
       any: b(0) || b(9),
       hud: k('KeyH') || b(8),
@@ -38,7 +42,7 @@ export class Input {
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }

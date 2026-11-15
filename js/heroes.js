@@ -161,11 +161,13 @@ function centurionModel() {
 }
 
 export const HERO_DEFS = {
-  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 55, flyBoost: 125, flyAccel: 1.6, turn: 3,
+  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 55, flyBoost: 125, flyAccel: 1.6, turn: 3, tackleSpeed: 85, mass: 1.3,
     capeColor: 0xb01010, style: 'fire' },
-  centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean' },
+  centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 110, mass: 1.0 },
 };
 
+const NO_INP = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
+const _v = new THREE.Vector3();
 const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; };
 
 
@@ -308,7 +310,16 @@ export class Hero {
     scene.add(this.rig.root);
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
+    // combat state
+    this.hp = 100; this.maxHp = 100; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0 };
+    this.ragdoll = null; this.grabbedBy = null; this.grabbing = null; this.ko = false; this.aim = V(0, 0, 1); this.shoulders = null;
+    this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
     if (this.def.style === 'fire') { this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5); this.rig.body.add(this.glow); this.glow.position.y = 0.4; }
+  }
+  forceFly() { // used by the AI to get airborne without button sequences
+    if (this.state === 'fly') return;
+    if (this.def.style === 'fire') { if (this.state === 'ground') { this.vel.y = 30; this.fireBurst(this.pos, 40, 12); } this.startFly(); }
+    else { if (this.state === 'ground') this.takeOff(); else this.state = 'fly'; }
   }
   setVisible(v) { this.rig.root.visible = v; if (this.glow) this.glow.visible = v; }
 
@@ -341,6 +352,20 @@ export class Hero {
       mohawks.nodes.push(...m.nodes); mohawks.mats.push(...m.mats);
     }
     this.rig.mohawks = mohawks;
+    // split arms: shoulder pivots per LOD (R = character's right hand, on -X since models face +Z)
+    const sh = { R: [], L: [] };
+    for (const s of lodObjects) s.traverse(o => { if (/_shoulderL$/.test(o.name)) sh.R.push(o); else if (/_shoulderR$/.test(o.name)) sh.L.push(o); });
+    if (sh.R.length && sh.L.length) {
+      this.shoulders = sh;
+      const fists = [];
+      for (const side of [sh.R[0], sh.L[0]]) {
+        const m = side.children.find(c => c.isMesh) || side.children[0];
+        let pt = V(0, -0.6, 0.05);
+        if (m && m.geometry) { m.geometry.computeBoundingBox(); m.updateMatrix(); const b = m.geometry.boundingBox.clone().applyMatrix4(m.matrix); const c = b.getCenter(V()); pt = V(c.x, b.min.y + 0.1, c.z + 0.02); }
+        const f = new THREE.Object3D(); f.name = 'fist'; f.position.copy(pt); side.add(f); fists.push(f);
+      }
+      this.rig.hands = fists; this.fists = fists;
+    }
     if (this.def.style === 'fire') {
       if (!this.glow) this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5);
       body.add(this.glow); this.glow.position.set(0, 0.15, 0.12);
@@ -368,6 +393,7 @@ export class Hero {
 
   update(dt, inp, cam, city) {
     const d = this.def, fire = d.style === 'fire'; this.t += dt;
+    const stun = this.knockT > 0; if (stun) { this.knockT -= dt; inp = NO_INP; }
     const fwd = cam.flatForward, right = cam.right;
     const wish = V().addScaledVector(fwd, inp.moveY).addScaledVector(right, inp.moveX);
     const prevYaw = this.yaw;
@@ -393,10 +419,19 @@ export class Hero {
         if (inp.jump && this.fromJump) this.heldJump += dt; else this.fromJump = false;
         if (!fire && this.fromJump && this.heldJump > 0.18) this.takeOff();
         else if (inp.jumpPressed || (fire && inp.jump && !this.fromJump && this.vel.y < 5)) this.startFly();
-      } else this.flyUpdate(dt, inp, cam);
+      } else if (stun) this.vel.multiplyScalar(Math.exp(-dt * 1.2));
+      else this.flyUpdate(dt, inp, cam);
       if (inp.cancelPressed && this.state === 'fly') this.state = 'air';
     }
 
+    // combat movement overrides: tackle dash / carrying a grabbed enemy, punch lunge
+    const act = this.action;
+    if (act && act.type === 'tackle' && !stun) {
+      if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
+      const spd = this.grabbing ? act.carrySpeed : d.tackleSpeed;
+      const dir = this.grabbing ? act.carryDir : this.aim;
+      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : 7)));
+    }
     // integrate with substeps for robust collisions
     const steps = Math.max(1, Math.ceil(this.vel.length() * dt / 0.8));
     let floor = 0;
@@ -416,7 +451,8 @@ export class Hero {
 
     // facing
     const hs = Math.hypot(this.vel.x, this.vel.z);
-    if (this.state === 'fly') { if (this.vel.length() > 3) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * d.turn)); else this.yaw = lerpAng(this.yaw, cam.yawFacing, dt * 3); }
+    if (act && act.type !== 'tackle' && Math.hypot(this.aim.x, this.aim.z) > 0.1) this.yaw = lerpAng(this.yaw, Math.atan2(this.aim.x, this.aim.z), Math.min(1, dt * 18));
+    else if (this.state === 'fly') { if (this.vel.length() > 3) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * d.turn)); else this.yaw = lerpAng(this.yaw, cam.yawFacing, dt * 3); }
     else if (hs > 1) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * 10));
     const yawRate = (((this.yaw - prevYaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI) / Math.max(dt, 1e-4);
     this.bank += (THREE.MathUtils.clamp(-yawRate * 0.35, -1.1, 1.1) * (this.state === 'fly' ? 1 : 0) - this.bank) * Math.min(1, dt * 5);
@@ -467,6 +503,7 @@ export class Hero {
     this.landSquash += (1 - this.landSquash) * Math.min(1, dt * 8);
     this.leapStretch += (1 - this.leapStretch) * Math.min(1, dt * 5);
     r.root.position.copy(this.pos); r.root.rotation.y = this.yaw;
+    if (this.ragdoll && this.useGLB) { this.animateRagdoll(dt); return; }
 
     if (this.useGLB) {
       const run = this.state === 'ground' ? Math.min(1, hs / 8) : 0;
@@ -481,9 +518,14 @@ export class Hero {
       const flyPitch = fire ? 1.13 : 1.48;
       const runLean = run * 0.2;
       const chargeLean = this.charge * 0.5;
-      r.body.rotation.x = fb * (flyPitch - climb * 0.7) + chargeLean + runLean;
-      r.body.rotation.z = this.bank;
+      const act = this.action;
+      this.upright += ((act && act.type !== 'tackle' ? 1 : 0) - this.upright) * Math.min(1, dt * 10);
+      const tackleLean = act && act.type === 'tackle' ? (this.state === 'fly' ? 0.25 : 0.6) : 0;
+      r.body.rotation.x = fb * (flyPitch - climb * 0.7) * (1 - 0.75 * this.upright) + chargeLean + runLean + tackleLean;
+      r.body.rotation.z = this.bank * (1 - this.upright);
+      r.body.rotation.y = 0;
       r.body.position.y = this.hipH;
+      this.animateArms(dt, run, fb, r.body.rotation.x);
       if (fire) this.fireFx(dt, fly);
       this.animateMohawk();
       return;
@@ -513,6 +555,52 @@ export class Hero {
     r.cape.update(Math.min(dt, 1 / 30), g, wind, Math.min(60, 4 + sp * 0.5));
     r.head.rotation.x = -fb * 1.1;
     if (fire) this.fireFx(dt, fly);
+  }
+  animateArms(dt, run, fb, bodyPitch) {
+    const sh = this.shoulders; if (!sh) return;
+    this.phase += dt * (Math.hypot(this.vel.x, this.vel.z) * 0.55 + 1);
+    const fire = this.def.style === 'fire', fly = this.state === 'fly', air = this.state === 'air' ? 1 : 0;
+    const sw = Math.sin(this.phase) * run * 0.5;
+    let rx = sw, lx = -sw, ro = 0.05 + air * 0.35, lo = 0.05 + air * 0.35;
+    if (fly) {
+      if (fire) { rx = lx = 0.35 * fb; ro = lo = 0.05 + 0.3 * fb; }
+      else { rx = -2.95 * fb; ro = 0.02; lx = 0.12 * fb; lo = 0.06; } // Centurion: right fist forward in flight
+    }
+    if (this.charge > 0) { rx = lx = 0.5 * this.charge; ro = lo = 0.2 * this.charge; }
+    const a = this.action;
+    if (a) {
+      const k = a.t / a.dur, aimPitch = Math.asin(THREE.MathUtils.clamp(this.aim.y, -1, 1));
+      const forward = -(Math.PI / 2 + aimPitch + bodyPitch);
+      if (a.type === 'blast') { const up = Math.min(1, a.t / 0.12) * (k > 0.8 ? (1 - k) / 0.2 : 1); rx = rx + (forward - rx) * up; ro = -0.08 * up; lx = 0.25; lo = 0.15; }
+      else if (a.type === 'punch') {
+        if (a.t < 0.13) { rx = 0.7 * (a.t / 0.13); ro = 0.25; } else { const e = Math.min(1, (a.t - 0.13) / 0.06) * (k > 0.75 ? (1 - k) / 0.25 : 1); rx = 0.7 + (forward - 0.7) * e; ro = -0.12 * e; }
+        lx = 0.35; lo = 0.2;
+      } else if (a.type === 'tackle') { const up = Math.min(1, a.t / 0.15); rx = lx = -2.85 * up; ro = lo = -0.12 * up; }
+    }
+    const L = (o, v, s) => o + (v - o) * Math.min(1, dt * s), A = this.arm, sp = a ? 30 : 12;
+    A.rx = L(A.rx, rx, sp); A.lx = L(A.lx, lx, sp); A.rz = L(A.rz, ro, sp); A.lz = L(A.lz, lo, sp);
+    this.applyArms();
+  }
+  applyArms() {
+    const sh = this.shoulders, A = this.arm; if (!sh) return;
+    for (const o of sh.R) { o.rotation.x = A.rx; o.rotation.z = -A.rz; }
+    for (const o of sh.L) { o.rotation.x = A.lx; o.rotation.z = A.lz; }
+  }
+  animateRagdoll(dt) {
+    const r = this.rig, rd = this.ragdoll;
+    r.squash.scale.set(1, 1, 1);
+    r.body.quaternion.copy(rd.q);
+    // keep the body resting on the ground when lying down (pivot is at the hips)
+    const up = _v.set(0, 1, 0).applyQuaternion(rd.q).y;
+    r.body.position.y = this.hipH * (0.32 + 0.68 * Math.max(0, up));
+    const fl = Math.min(1, rd.flail);
+    const A = this.arm, t = this.t;
+    A.rx = Math.sin(t * 13.1) * 1.6 * fl - 1.2 * fl; A.lx = Math.sin(t * 11.3 + 1.7) * 1.6 * fl - 1.0 * fl;
+    A.rz = 0.6 + Math.sin(t * 9.7) * 0.8 * fl; A.lz = 0.6 + Math.sin(t * 10.9 + 0.6) * 0.8 * fl;
+    if (rd.getUp > 0) { const e = Math.min(1, rd.getUp); A.rx *= 1 - e; A.lx *= 1 - e; A.rz *= 1 - e; A.lz *= 1 - e; }
+    this.applyArms();
+    if (this.def.style === 'fire') this.fireFx(dt, false);
+    this.animateMohawk();
   }
   animateMohawk() {
     const mh = this.rig.mohawks; if (!mh || !mh.nodes.length) return;

@@ -12,6 +12,7 @@ import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
 import { QualityManager } from './quality.js';
+import { Combat } from './combat.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: /shot/.test(location.search) });
 renderer.setSize(innerWidth, innerHeight);
@@ -28,7 +29,10 @@ const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
 let idx = 0; heroes[0].setVisible(false); heroes[1].setVisible(false);
 heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
+heroes[1].pos.set(-HALF + 20 * BLOCK + 9 + 40, 0, -HALF + 22 * BLOCK + 9); heroes[1].yaw = -Math.PI / 2;
 const input = new Input(renderer.domElement), cam = new ThirdPersonCamera(camera), hud = new HUD();
+const combat = new Combat(scene, fx, city, cam, hud);
+const NOINP = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, boost: 0, descend: 0 };
 
 // post-processing: HDR render -> subtle bloom -> ACES tone map + sRGB
 const composer = new EffectComposer(renderer);
@@ -70,7 +74,7 @@ function markReady(usedFallback) {
   setLoad(1, usedFallback ? 'Ready (using backup models)' : 'Ready');
   if (startHint) startHint.style.display = 'block';
   if (loadStatus) loadStatus.style.opacity = '0.7';
-  heroes[idx].setVisible(true);
+  heroes[0].setVisible(true); heroes[1].setVisible(true);
 }
 
 preloadHeroModels((p, url) => {
@@ -90,12 +94,32 @@ preloadHeroModels((p, url) => {
   markReady(true);
 });
 
+// Y swaps heroes: you take over the other character, and your old hero becomes the computer-controlled rival
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
-  b.pos.copy(a.pos); b.vel.copy(a.vel); b.yaw = a.yaw; b.state = a.state === 'fly' ? 'fly' : a.state; b.charge = 0; b.flyBlend = a.flyBlend;
-  a.setVisible(false); b.setVisible(true); idx ^= 1; if (a.glow) a.glow.intensity = 0;
+  const save = { pos: b.pos.clone(), vel: b.vel.clone(), yaw: b.yaw, state: b.state, hp: b.hp, ko: b.ko, rag: b.ragdoll, koT: b.koT };
+  for (const h of [a, b]) { if (h.grabbing) combat.releaseGrab(h); h.action = null; }
+  b.pos.copy(a.pos); b.vel.copy(a.vel); b.yaw = a.yaw; b.state = a.state; b.charge = 0; b.flyBlend = a.flyBlend; b.hp = a.hp; b.ko = a.ko; b.koT = a.koT;
+  b.ragdoll = a.ragdoll; if (!b.ragdoll) b.rig.body.rotation.set(0, 0, 0);
+  a.pos.copy(save.pos); a.vel.copy(save.vel); a.yaw = save.yaw; a.state = save.state; a.charge = 0; a.hp = save.hp; a.ko = save.ko; a.koT = save.koT;
+  a.ragdoll = save.rag; if (!a.ragdoll) a.rig.body.rotation.set(0, 0, 0);
+  idx ^= 1;
+  hud.say(`You: ${heroes[idx].def.name}  ·  Rival: ${heroes[idx ^ 1].def.name}`);
 }
-
+function combatFrame(dt, inp) {
+  const P = heroes[idx], E = heroes[idx ^ 1];
+  const pFree = !P.ragdoll && !P.grabbedBy, eFree = !E.ragdoll && !E.grabbedBy;
+  if (pFree) P.update(dt, P.ko ? NOINP : inp, cam, city);
+  const aiInp = combat.aiInput(dt, E, P);
+  if (eFree) E.update(dt, aiInp, combat.aiCam, city);
+  combat.update(dt, P, E, P.ko ? null : inp, cam.forward);
+  if (P.ragdoll || P.grabbedBy) P.animate(dt, 0);
+  if (E.ragdoll || E.grabbedBy) E.animate(dt, 0);
+  // KO -> respawn
+  if (P.ko && (P.koT += dt) > 3.2) { combat.reset(P, P.pos.clone().setY(city.heightAt(P.pos.x, P.pos.z))); hud.say('Back on your feet'); }
+  if (E.ko && (E.koT += dt) > 4) combat.respawnNear(E, P);
+  hud.bars(P, E, combat.inCombat(P, E), dt);
+}
 const clock = new THREE.Clock();
 let paused = false;
 function render() { if (usePost) composer.render(); else renderer.render(scene, camera); }
@@ -107,10 +131,10 @@ function frame() {
   if (inp.hudPressed) hud.toggle();
   if (inp.qualityPressed) hud.say('Graphics: ' + quality.cycle());
   const h = heroes[idx];
-  if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); }
+  if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); heroes[idx ^ 1].animate(dt, 0); }
   else {
     if (inp.switchPressed) switchHero();
-    heroes[idx].update(dt, inp, cam, city); cam.update(dt, inp, heroes[idx], city);
+    combatFrame(dt, inp); cam.update(dt, inp, heroes[idx], city);
   }
   step(dt, raw);
 }
@@ -126,5 +150,5 @@ function step(dt, raw, noRender) {
 }
 frame();
 // debug/screenshot hook
-window.__game = { heroes, city, cam, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
+window.__game = { heroes, city, cam, combat, combatFrame, get enemy() { return heroes[idx ^ 1]; }, hud, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
   setPaused(v) { paused = v; }, scene, THREE, get ready() { return assetsReady; }, markReady };
