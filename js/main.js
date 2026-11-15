@@ -7,7 +7,7 @@ import { Input } from './input.js';
 import { City, BLOCK, HALF, WATER_Y } from './city.js';
 import { World } from './world.js';
 import { Traffic } from './traffic.js';
-import { Hero } from './heroes.js';
+import { Hero, preloadHeroModels } from './heroes.js';
 import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
@@ -26,7 +26,7 @@ const city = new City(scene);
 const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
-let idx = 0; heroes[1].setVisible(false);
+let idx = 0; heroes[0].setVisible(false); heroes[1].setVisible(false);
 heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 const input = new Input(renderer.domElement), cam = new ThirdPersonCamera(camera), hud = new HUD();
 
@@ -48,14 +48,47 @@ quality = new QualityManager(q => {
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) { if (rt.samples !== q.msaa) { rt.samples = q.msaa; rt.dispose(); } }
   city.treeMesh.castShadow = q.shadow >= 2048; traffic.body.castShadow = q.shadow >= 1024;
   scene.fog.density = 0.00042 * 1700 / q.view;
+  for (const h of heroes) h.setQuality?.(q);
   if (quality) resize();
 });
 resize(); addEventListener('resize', resize);
 
-const start = document.getElementById('start'); let started = false;
-const begin = () => { started = true; start.style.display = 'none'; };
-start.addEventListener('click', () => { begin(); renderer.domElement.requestPointerLock?.(); });
+const start = document.getElementById('start'); let started = false, assetsReady = false;
+const loadStatus = document.getElementById('loadStatus');
+const loadBar = document.getElementById('loadBar')?.firstElementChild;
+const startHint = document.getElementById('startHint');
+function setLoad(p, msg) {
+  if (loadBar) loadBar.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%';
+  if (msg && loadStatus) loadStatus.textContent = msg;
+}
+const begin = () => { if (!assetsReady || started) return; started = true; start.style.display = 'none'; };
+start.addEventListener('click', () => { begin(); if (started) renderer.domElement.requestPointerLock?.(); });
 renderer.domElement.addEventListener('click', () => { if (started && !document.pointerLockElement) renderer.domElement.requestPointerLock?.(); });
+
+function markReady(usedFallback) {
+  assetsReady = true;
+  setLoad(1, usedFallback ? 'Ready (using backup models)' : 'Ready');
+  if (startHint) startHint.style.display = 'block';
+  if (loadStatus) loadStatus.style.opacity = '0.7';
+  heroes[idx].setVisible(true);
+}
+
+preloadHeroModels((p, url) => {
+  const name = typeof url === 'string' ? url.split('/').pop() : '';
+  const pretty = name && name.includes('_meshopt') ? `Loading ${name}` : 'Loading heroes…';
+  setLoad(p, pretty);
+}).then(models => {
+  let fallback = false;
+  for (const h of heroes) {
+    const levels = models?.[h.key];
+    if (levels && h.adoptModels(levels)) h.setQuality(quality.preset);
+    else { fallback = true; console.warn('Using primitive fallback for', h.key); }
+  }
+  markReady(fallback);
+}).catch(err => {
+  console.warn('Hero model preload failed, using primitives', err);
+  markReady(true);
+});
 
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
@@ -74,7 +107,7 @@ function frame() {
   if (inp.hudPressed) hud.toggle();
   if (inp.qualityPressed) hud.say('Graphics: ' + quality.cycle());
   const h = heroes[idx];
-  if (!started) { if (inp.anyPressed) begin(); else { cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); } }
+  if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); }
   else {
     if (inp.switchPressed) switchHero();
     heroes[idx].update(dt, inp, cam, city); cam.update(dt, inp, heroes[idx], city);
@@ -94,4 +127,4 @@ function step(dt, raw, noRender) {
 frame();
 // debug/screenshot hook
 window.__game = { heroes, city, cam, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
-  setPaused(v) { paused = v; }, scene, THREE };
+  setPaused(v) { paused = v; }, scene, THREE, get ready() { return assetsReady; }, markReady };

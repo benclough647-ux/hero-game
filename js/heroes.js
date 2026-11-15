@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-// Hero definitions, sculpted PBR models (bevelled armour, fur-shell Temper Tiger), verlet cloth capes,
-// shader flames, and traversal physics.
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+// Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
+// and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const GRAV = 32;
 const phys = (o) => new THREE.MeshPhysicalMaterial(o);
@@ -166,17 +168,201 @@ export const HERO_DEFS = {
 
 const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; };
 
+
+// ---------- game-ready GLB models ----------
+const MODEL_FILES = {
+  tiger: [0, 1, 2].map(i => `./assets/tiger_game_lod${i}_meshopt.glb`),
+  centurion: [0, 1, 2].map(i => `./assets/cent_game_lod${i}_meshopt.glb`),
+};
+
+function prepareMeshes(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap']) {
+        if (m[k]) { m[k].anisotropy = 8; m[k].needsUpdate = true; }
+      }
+      // Keep baked emissive punchy so bloom can pick up fists, eyes and the mohawk.
+      if (m.emissiveMap && m.emissiveIntensity < 1.5) m.emissiveIntensity = 2.5;
+    }
+  });
+}
+
+function collectMohawks(root) {
+  const named = [];
+  root.traverse(o => { if (/mohawk/i.test(o.name || '')) named.push(o); });
+  // Prefer the top-most "Mohawk" node so we scale the already-transformed meshopt pivot.
+  const nodes = named.filter(o => !named.includes(o.parent));
+  const mats = [];
+  for (const n of nodes) {
+    n.userData.baseScale = n.scale.clone();
+    n.traverse(o => {
+      if (!o.isMesh) return;
+      const list = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of list) if (m && !mats.includes(m)) { m.userData.baseEmissive = m.emissiveIntensity || 3; mats.push(m); }
+    });
+  }
+  return { nodes, mats };
+}
+
+function attachPointsFromModel(source, parent) {
+  parent.updateMatrixWorld(true);
+  const inv = parent.matrixWorld.clone().invert();
+  const xs = [], ys = [], zs = [];
+  const v = new THREE.Vector3();
+  source.traverse(o => {
+    if (!o.isMesh || /mohawk/i.test(o.name || '')) return;
+    const attr = o.geometry?.attributes?.position; if (!attr) return;
+    o.updateMatrixWorld(true);
+    for (let i = 0; i < attr.count; i++) {
+      v.fromBufferAttribute(attr, i).applyMatrix4(o.matrixWorld).applyMatrix4(inv);
+      xs.push(v.x); ys.push(v.y); zs.push(v.z);
+    }
+  });
+  const mk = (x, y, z, name) => { const p = new THREE.Object3D(); p.name = name; p.position.set(x, y, z); parent.add(p); return p; };
+  if (!ys.length) {
+    const h = 1.8;
+    return { hands: [mk(-0.35, h * 0.55, 0.05, 'handL'), mk(0.35, h * 0.55, 0.05, 'handR')], feet: [mk(-0.15, 0.05, 0.05, 'footL'), mk(0.15, 0.05, 0.05, 'footR')] };
+  }
+  const n = ys.length;
+  const minY = Math.min(...ys), maxY = Math.max(...ys), h = Math.max(0.1, maxY - minY);
+  const footCut = minY + Math.min(0.14, h * 0.08);
+  const foot = { L: [], R: [] };
+  for (let i = 0; i < n; i++) if (ys[i] <= footCut) (xs[i] < 0 ? foot.L : foot.R).push(i);
+  const lowestMean = (idx, fallback) => {
+    if (!idx.length) return fallback;
+    const cut = minY + 0.05;
+    const low = idx.filter(i => ys[i] <= cut);
+    const use = low.length ? low : idx;
+    let x = 0, y = 0, z = 0;
+    for (const i of use) { x += xs[i]; y += ys[i]; z += zs[i]; }
+    return [x / use.length, y / use.length, z / use.length];
+  };
+  const y0 = 0.4 * h, y1 = 0.72 * h;
+  const mid = { L: [], R: [] };
+  for (let i = 0; i < n; i++) if (ys[i] >= y0 && ys[i] <= y1) (xs[i] < 0 ? mid.L : mid.R).push(i);
+  const extremeMean = (idx, sign, fallback) => {
+    if (!idx.length) return fallback;
+    let maxA = 0;
+    for (const i of idx) maxA = Math.max(maxA, Math.abs(xs[i]));
+    const thr = maxA * 0.92;
+    const ext = idx.filter(i => Math.abs(xs[i]) >= thr);
+    const use = ext.length ? ext : idx;
+    let x = 0, y = 0, z = 0;
+    for (const i of use) { x += xs[i]; y += ys[i]; z += zs[i]; }
+    return [x / use.length, y / use.length, z / use.length];
+  };
+  const fL = lowestMean(foot.L, [-0.18, 0.04, 0.04]), fR = lowestMean(foot.R, [0.18, 0.04, 0.04]);
+  const hL = extremeMean(mid.L, -1, [-0.4, minY + h * 0.55, 0]), hR = extremeMean(mid.R, 1, [0.4, minY + h * 0.55, 0]);
+  return {
+    hands: [mk(hL[0], hL[1], hL[2], 'handL'), mk(hR[0], hR[1], hR[2], 'handR')],
+    feet: [mk(fL[0], fL[1], fL[2], 'footL'), mk(fR[0], fR[1], fR[2], 'footR')],
+  };
+}
+
+export async function preloadHeroModels(onProgress) {
+  try {
+    if (MeshoptDecoder.ready) await MeshoptDecoder.ready;
+  } catch (e) { console.warn('MeshoptDecoder.ready failed', e); }
+  const manager = new THREE.LoadingManager();
+  manager.onProgress = (url, loaded, total) => { onProgress?.(loaded / Math.max(1, total), url); };
+  const loader = new GLTFLoader(manager);
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  const loadOne = (url) => new Promise((resolve, reject) => {
+    loader.load(url, gltf => resolve(gltf.scene), undefined, reject);
+  });
+  const keys = Object.keys(MODEL_FILES);
+  const slots = Object.fromEntries(keys.map(k => [k, []]));
+  const jobs = [];
+  for (const key of keys) {
+    MODEL_FILES[key].forEach((url, i) => {
+      jobs.push(loadOne(url).then(scene => {
+        prepareMeshes(scene);
+        slots[key][i] = scene;
+      }).catch(e => {
+        console.warn('Failed to load', url, e);
+        if (i === 0) slots[key].failed = true;
+      }));
+    });
+  }
+  await Promise.all(jobs);
+  const result = {};
+  for (const key of keys) {
+    const scenes = (slots[key] || []).filter(Boolean);
+    result[key] = (!slots[key].failed && scenes.length) ? scenes : null;
+  }
+  onProgress?.(1, 'done');
+  return result;
+}
+
 export class Hero {
   constructor(key, scene, effects) {
-    this.key = key; this.def = HERO_DEFS[key]; this.fx = effects;
+    this.key = key; this.def = HERO_DEFS[key]; this.fx = effects; this.scene = scene;
     this.rig = this.def.build(); this.rig.root.scale.setScalar(this.def.height / 1.83);
     this.rig.root.rotation.order = 'YXZ'; this.rig.body.rotation.order = 'YXZ';
+    this.useGLB = false; this.landSquash = 1; this.leapStretch = 1; this.qualityName = 'High';
     scene.add(this.rig.root);
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
     if (this.def.style === 'fire') { this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5); this.rig.body.add(this.glow); this.glow.position.y = 0.4; }
   }
-  setVisible(v) { this.rig.root.visible = v; }
+  setVisible(v) { this.rig.root.visible = v; if (this.glow) this.glow.visible = v; }
+
+  // Swap the primitive fallback for loaded LOD meshes. Safe to call once; no-ops if levels are missing.
+  adoptModels(levels) {
+    if (!levels || !levels[0]) return false;
+    const root = this.rig.root;
+    if (this.glow && this.glow.parent) this.glow.parent.remove(this.glow);
+    while (root.children.length) root.remove(root.children[0]);
+    root.scale.set(1, 1, 1); // GLBs are already in metres, origin at the feet, facing +Z
+
+    const hipH = this.def.height * 0.52;
+    const squash = new THREE.Group(); squash.name = 'squash';
+    const body = new THREE.Group(); body.name = 'body'; body.position.y = hipH; body.rotation.order = 'YXZ';
+    const model = new THREE.Group(); model.name = 'model'; model.position.y = -hipH;
+    const lod = new THREE.LOD(); lod.name = 'heroLod';
+    const lodObjects = levels.slice();
+    model.add(lod);
+    body.add(model); squash.add(body); root.add(squash);
+    root.rotation.order = 'YXZ';
+
+    this.rig = { root, squash, body, model, lod, lodObjects, mohawks: { nodes: [], mats: [] }, hands: [], feet: [], arms: [], legs: [], head: model, cape: null };
+    this.useGLB = true; this.hipH = hipH;
+    this.applyLodLevels();
+    const pts = attachPointsFromModel(lodObjects[0], model);
+    this.rig.hands = pts.hands; this.rig.feet = pts.feet;
+    const mohawks = { nodes: [], mats: [] };
+    for (const s of lodObjects) {
+      const m = collectMohawks(s);
+      mohawks.nodes.push(...m.nodes); mohawks.mats.push(...m.mats);
+    }
+    this.rig.mohawks = mohawks;
+    if (this.def.style === 'fire') {
+      if (!this.glow) this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5);
+      body.add(this.glow); this.glow.position.set(0, 0.15, 0.12);
+    }
+    return true;
+  }
+  setQuality(preset) { this.qualityName = preset?.name || 'High'; this.applyLodLevels(); }
+  applyLodLevels() {
+    if (!this.useGLB || !this.rig.lod) return;
+    const lod = this.rig.lod, objs = this.rig.lodObjects;
+    for (const l of lod.levels.slice()) { lod.remove(l.object); }
+    lod.levels.length = 0;
+    const low = this.qualityName === 'Low';
+    if (low) {
+      lod.addLevel(objs[1] || objs[0], 0);
+      if (objs[2]) lod.addLevel(objs[2], 16);
+    } else {
+      lod.addLevel(objs[0], 0);
+      if (objs[1]) lod.addLevel(objs[1], 12);
+      if (objs[2]) lod.addLevel(objs[2], 28);
+    }
+  }
   get speed() { return this.vel.length(); }
   get modeLabel() { return { ground: 'On foot', air: 'Airborne', fly: this.def.style === 'fire' ? 'Fire flight' : 'Flying' }[this.state] + (this.charge > 0 ? ' – charging leap' : ''); }
 
@@ -240,7 +426,7 @@ export class Hero {
     const c = this.charge; this.charge = 0;
     const dir = Math.hypot(this.vel.x, this.vel.z) > 0.5 ? V(this.vel.x, 0, this.vel.z).normalize() : V(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.vel.y = 14 + 62 * c; this.vel.x = dir.x * (10 + 70 * c); this.vel.z = dir.z * (10 + 70 * c);
-    this.state = 'air'; this.fromJump = true; this.heldJump = 0;
+    this.state = 'air'; this.fromJump = true; this.heldJump = 0; this.leapStretch = 1.16 + 0.14 * c;
     if (c > 0.4) { this.fx.shockwave(this.pos, 0xff7020, 10 + 25 * c); this.fireBurst(this.pos, 80 * c, 14); this.fx.dustBurst(this.pos, 40, 20); }
   }
   takeOff() { // Centurion: forceful launch, dust + shockwave on the ground only, then clean flight
@@ -252,6 +438,7 @@ export class Hero {
   startFly() { this.state = 'fly'; this.fromJump = false; if (this.def.style === 'fire') this.fireBurst(this.pos, 40, 10); }
   land() {
     const impact = -this.vel.y, hs = Math.hypot(this.vel.x, this.vel.z); this.state = 'ground';
+    this.landSquash = Math.max(0.72, 1 - Math.min(0.28, impact / 90)); this.leapStretch = 1;
     if (hs > 6) { const c = Math.min(1, this.def.sprint * 1.6 / hs); this.vel.x *= c; this.vel.z *= c; this.sprintT = 1.4; } // dive -> sprint
     if (impact > 6 || hs > 20) this.fx.dustBurst(this.pos, 25 + Math.min(80, impact + hs * 0.3), 5 + Math.min(25, impact * 0.3 + hs * 0.08));
     if (impact > 35) this.fx.shockwave(this.pos, this.def.style === 'fire' ? 0xff7020 : 0xe8e2d0, Math.min(40, impact * 0.5));
@@ -277,11 +464,35 @@ export class Hero {
     this.flyBlend += ((fly ? Math.min(1, sp / 25) : 0) - this.flyBlend) * Math.min(1, dt * 4);
     const fb = this.flyBlend;
     const climb = fly && sp > 1 ? Math.asin(THREE.MathUtils.clamp(this.vel.y / sp, -1, 1)) : 0;
+    this.landSquash += (1 - this.landSquash) * Math.min(1, dt * 8);
+    this.leapStretch += (1 - this.leapStretch) * Math.min(1, dt * 5);
     r.root.position.copy(this.pos); r.root.rotation.y = this.yaw;
+
+    if (this.useGLB) {
+      const run = this.state === 'ground' ? Math.min(1, hs / 8) : 0;
+      const breath = this.state === 'ground' && run < 0.15 ? 1 + Math.sin(this.t * 2.4) * 0.015 : 1;
+      const crouch = 1 - this.charge * 0.2;
+      const sy = Math.max(0.7, this.landSquash * this.leapStretch * crouch * breath);
+      const sxz = 1 / Math.sqrt(sy);
+      r.squash.scale.set(sxz, sy, sxz);
+      const airStretch = this.state === 'air' && this.vel.y > 8 ? THREE.MathUtils.clamp(this.vel.y / 80, 0, 0.12) : 0;
+      r.squash.scale.y += airStretch;
+      // Flight: Centurion nearly horizontal (80–90°), Tiger a shallower lean (60–70°). Bank with turns.
+      const flyPitch = fire ? 1.13 : 1.48;
+      const runLean = run * 0.2;
+      const chargeLean = this.charge * 0.5;
+      r.body.rotation.x = fb * (flyPitch - climb * 0.7) + chargeLean + runLean;
+      r.body.rotation.z = this.bank;
+      r.body.position.y = this.hipH;
+      if (fire) this.fireFx(dt, fly);
+      this.animateMohawk();
+      return;
+    }
+
     r.body.rotation.x = fb * (Math.PI / 2 - climb) + (this.charge * 0.5);
     r.body.rotation.z = this.bank;
     r.body.position.y = 0.95 - this.charge * 0.25;
-    // limb animation
+    // limb animation (primitive fallback only)
     this.phase += dt * (hs * 0.9 + 1);
     const run = this.state === 'ground' ? Math.min(1, hs / 8) : 0, sw = Math.sin(this.phase) * run;
     const airPose = this.state === 'air' ? 1 : 0;
@@ -303,15 +514,33 @@ export class Hero {
     r.head.rotation.x = -fb * 1.1;
     if (fire) this.fireFx(dt, fly);
   }
+  animateMohawk() {
+    const mh = this.rig.mohawks; if (!mh || !mh.nodes.length) return;
+    const t = this.t;
+    for (let i = 0; i < mh.nodes.length; i++) {
+      const n = mh.nodes[i], b = n.userData.baseScale || n.scale;
+      const flicker = 0.08 * Math.sin(t * 17 + i) + 0.05 * Math.sin(t * 29 + i * 1.7);
+      const wave = 0.14 * Math.sin(t * 22 + i * 2) + 0.04 * Math.sin(t * 7.5);
+      n.scale.set(b.x * (1 + flicker), b.y * (1 + wave), b.z * (1 + flicker * 0.8));
+      n.rotation.z = Math.sin(t * 11 + i) * 0.06;
+      n.rotation.x = Math.sin(t * 8.5 + i * 0.6) * 0.04;
+    }
+    for (const m of mh.mats) {
+      const base = m.userData.baseEmissive || 3;
+      m.emissiveIntensity = base * (0.82 + 0.28 * Math.sin(t * 14) + 0.1 * Math.sin(t * 31));
+    }
+  }
   fireFx(dt, fly) {
     const r = this.rig, fx = this.fx.fire, w = V(), v = V();
-    // mohawk flames flicker + embers
-    r.flameMat.uniforms.t.value = this.t; r.flames.forEach((f, i) => { const s = 0.8 + Math.sin(this.t * 20 + i * 2) * 0.3 + Math.random() * 0.2; f.scale.set(1, s, 1); });
+    // primitive fallback: shader-flame mohawk flicker
+    if (!this.useGLB && r.flameMat) {
+      r.flameMat.uniforms.t.value = this.t; r.flames.forEach((f, i) => { const s = 0.8 + Math.sin(this.t * 20 + i * 2) * 0.3 + Math.random() * 0.2; f.scale.set(1, s, 1); });
+    }
     const yel = new THREE.Color(2.6, 1.4, 0.35), red = new THREE.Color(1.6, 0.18, 0.02), wht = new THREE.Color(3, 2.6, 1.8);
-    if (Math.random() < 0.5) { r.head.localToWorld(w.set(0, 0.2, 0)); fx.emit(w, v.set(0, 3, 0).add(this.vel), 0.25, yel, red); }
+    if (!this.useGLB && r.head && Math.random() < 0.5) { r.head.localToWorld(w.set(0, 0.2, 0)); fx.emit(w, v.set(0, 3, 0).add(this.vel), 0.25, yel, red); }
     if (this.charge > 0) for (const h of [...r.hands, ...r.feet]) { h.getWorldPosition(w); fx.emit(w, v.set((Math.random() - .5) * 3, 2 + Math.random() * 3, (Math.random() - .5) * 3), 0.35, yel, red); }
     const jet = fly || (this.state === 'air' && this.vel.y > 10);
-    this.glow.intensity += ((fly ? 60 : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 6);
+    if (this.glow) this.glow.intensity += ((fly ? 60 : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 6);
     if (!jet) return;
     // jets from hands and feet, pushed opposite to travel + trail
     const back = this.vel.clone(); const sp = back.length(); if (sp > 1) back.multiplyScalar(-1 / sp); else back.set(0, -1, 0);

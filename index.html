@@ -13,10 +13,14 @@ html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:Segoe
 #hint{display:none;position:fixed;left:24px;bottom:18px;font-size:14px;opacity:.8;pointer-events:none;text-shadow:0 1px 3px #000;line-height:1.5}
 #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(#0000,#000c);font-size:22px;text-align:center;cursor:pointer}
 #start h1{font-size:54px;margin:0 0 10px;letter-spacing:4px}
+#loadStatus{font-size:15px;opacity:.75;margin-top:14px}
+#loadBar{width:240px;height:6px;background:#fff2;margin-top:16px;border-radius:3px;overflow:hidden}
+#loadBar>div{height:100%;width:0;background:#ffe08a;transition:width .15s}
+#startHint{margin-top:8px}
 </style></head><body>
 <div id="hud"><div id="hero"></div><div id="stats"></div><div id="mode"></div><div id="charge"><div></div></div></div>
 <div id="hint"></div><div id="toast"></div>
-<div id="start"><h1>HERO CITY</h1><div>Click or press <b>A</b> on your controller to start</div><div style="font-size:15px;opacity:.7;margin-top:12px">Temper Tiger &amp; Centurion · H / View button toggles HUD · G changes graphics quality</div></div>
+<div id="start"><h1>HERO CITY</h1><div id="loadStatus">Loading heroes…</div><div id="loadBar"><div></div></div><div id="startHint" style="display:none">Click or press <b>A</b> on your controller to start</div><div style="font-size:15px;opacity:.7;margin-top:12px">Temper Tiger &amp; Centurion · H / View button toggles HUD · G changes graphics quality</div></div>
 <script type="importmap">{"imports":{"three":"./js/vendor/three.module.js","three/addons/":"./js/vendor/addons/"}}</script>
 <script type="module" src="./js/main.js"></script>
 </body></html>
