@@ -172,6 +172,9 @@ const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math
 
 
 // ---------- game-ready GLB models ----------
+// Rigged + animated heroes (skeleton, skinned body/cape LOD0+LOD1, mohawk on the head bone, 12 clips).
+const SKINNED_FILES = { tiger: './assets/tiger_skinned.glb', centurion: './assets/cent_skinned.glb' };
+// Older unrigged LOD models: only loaded if the rigged file fails (or with ?legacy in the URL).
 const MODEL_FILES = {
   tiger: [0, 1, 2].map(i => `./assets/tiger_game_lod${i}_meshopt.glb`),
   centurion: [0, 1, 2].map(i => `./assets/cent_game_lod${i}_meshopt.glb`),
@@ -274,17 +277,27 @@ export async function preloadHeroModels(onProgress) {
   manager.onProgress = (url, loaded, total) => { onProgress?.(loaded / Math.max(1, total), url); };
   const loader = new GLTFLoader(manager);
   loader.setMeshoptDecoder(MeshoptDecoder);
-  const loadOne = (url) => new Promise((resolve, reject) => {
-    loader.load(url, gltf => resolve(gltf.scene), undefined, reject);
-  });
+  const loadGltf = (url) => new Promise((resolve, reject) => { loader.load(url, resolve, undefined, reject); });
   const keys = Object.keys(MODEL_FILES);
-  const slots = Object.fromEntries(keys.map(k => [k, []]));
+  const legacy = typeof location !== 'undefined' && /[?&]legacy\b/.test(location.search);
+  const result = {};
+  // 1) rigged models
+  if (!legacy) {
+    await Promise.all(keys.map(key => loadGltf(SKINNED_FILES[key]).then(gltf => {
+      if (!gltf.animations?.length) throw new Error('no animations in ' + SKINNED_FILES[key]);
+      prepareMeshes(gltf.scene);
+      result[key] = { skinned: gltf };
+    }).catch(e => console.warn('Rigged model failed, falling back to static LODs:', SKINNED_FILES[key], e))));
+  }
+  // 2) fallback: static LOD models for any hero whose rigged file did not load
+  const need = keys.filter(k => !result[k]);
+  const slots = Object.fromEntries(need.map(k => [k, []]));
   const jobs = [];
-  for (const key of keys) {
+  for (const key of need) {
     MODEL_FILES[key].forEach((url, i) => {
-      jobs.push(loadOne(url).then(scene => {
-        prepareMeshes(scene);
-        slots[key][i] = scene;
+      jobs.push(loadGltf(url).then(gltf => {
+        prepareMeshes(gltf.scene);
+        slots[key][i] = gltf.scene;
       }).catch(e => {
         console.warn('Failed to load', url, e);
         if (i === 0) slots[key].failed = true;
@@ -292,8 +305,7 @@ export async function preloadHeroModels(onProgress) {
     });
   }
   await Promise.all(jobs);
-  const result = {};
-  for (const key of keys) {
+  for (const key of need) {
     const scenes = (slots[key] || []).filter(Boolean);
     result[key] = (!slots[key].failed && scenes.length) ? scenes : null;
   }
@@ -301,12 +313,17 @@ export async function preloadHeroModels(onProgress) {
   return result;
 }
 
+const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'tackle', 'fall', 'down']);
+// clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
+const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch']);
+const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3();
+
 export class Hero {
   constructor(key, scene, effects) {
     this.key = key; this.def = HERO_DEFS[key]; this.fx = effects; this.scene = scene;
     this.rig = this.def.build(); this.rig.root.scale.setScalar(this.def.height / 1.83);
     this.rig.root.rotation.order = 'YXZ'; this.rig.body.rotation.order = 'YXZ';
-    this.useGLB = false; this.landSquash = 1; this.leapStretch = 1; this.qualityName = 'High';
+    this.useGLB = false; this.useSkin = false; this.anim = null; this.landSquash = 1; this.leapStretch = 1; this.qualityName = 'High';
     scene.add(this.rig.root);
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
@@ -325,6 +342,7 @@ export class Hero {
 
   // Swap the primitive fallback for loaded LOD meshes. Safe to call once; no-ops if levels are missing.
   adoptModels(levels) {
+    if (levels && levels.skinned) return this.adoptSkinned(levels.skinned);
     if (!levels || !levels[0]) return false;
     const root = this.rig.root;
     if (this.glow && this.glow.parent) this.glow.parent.remove(this.glow);
@@ -372,9 +390,105 @@ export class Hero {
     }
     return true;
   }
+  // Rigged model: skeleton + AnimationMixer. The body group still carries whole-body pitch/bank/ragdoll rotation.
+  adoptSkinned(gltf) {
+    const scene = gltf.scene, root = this.rig.root;
+    if (this.glow && this.glow.parent) this.glow.parent.remove(this.glow);
+    while (root.children.length) root.remove(root.children[0]);
+    root.scale.set(1, 1, 1); root.rotation.order = 'YXZ';
+    const hipH = this.def.height * 0.52;
+    const squash = new THREE.Group(); squash.name = 'squash';
+    const body = new THREE.Group(); body.name = 'body'; body.position.y = hipH; body.rotation.order = 'YXZ';
+    const model = new THREE.Group(); model.name = 'model'; model.position.y = -hipH;
+    model.add(scene); body.add(model); squash.add(body); root.add(squash);
+    const bones = {}, lod0 = [], lod1 = [];
+    scene.traverse(o => {
+      if (o.isBone) bones[o.name.replace(/[.\s]/g, '')] = o;
+      if (o.isMesh) {
+        o.frustumCulled = false; // skinned bounds don't follow the pose (flight, ragdoll)
+        if (/mohawk/i.test(o.name || '') || /mohawk/i.test(o.parent?.name || '')) return;
+        (/_lod1$/i.test(o.name) ? lod1 : lod0).push(o);
+      }
+    });
+    const B = n => bones[n.replace(/[.\s]/g, '')];
+    if (!B('hips') || !B('hand.R')) { console.warn('Rigged model is missing bones, using fallback'); return false; }
+    const mixer = new THREE.AnimationMixer(scene);
+    const clips = Object.fromEntries(gltf.animations.map(c => [c.name, c]));
+    if (clips.getup) { const c = clips.getup.clone(); c.name = 'crouch'; clips.crouch = c; }
+    const actions = {}, w = {};
+    for (const [name, clip] of Object.entries(clips)) {
+      const a = mixer.clipAction(clip);
+      a.setLoop(SKIN_LOOPS.has(name) ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+      a.clampWhenFinished = true; a.enabled = true; a.play(); a.setEffectiveWeight(name === 'idle' ? 1 : 0);
+      if (SKIN_DRIVEN.has(name)) a.setEffectiveTimeScale(0);
+      actions[name] = a; w[name] = name === 'idle' ? 1 : 0;
+    }
+    const attach = (bone, x, y, z, name) => { const o = new THREE.Object3D(); o.name = name; o.position.set(x, y, z); bone.add(o); return o; };
+    const k = this.def.height / 1.83;
+    // bone local +Y runs along the bone (Blender convention), so the fist sits a little past the wrist
+    const fists = [attach(B('hand.R'), 0, 0.07 * k, 0, 'fistR'), attach(B('hand.L'), 0, 0.07 * k, 0, 'fistL')];
+    const feet = [attach(B('toe.L') || B('foot.L'), 0, 0, 0, 'footL'), attach(B('toe.R') || B('foot.R'), 0, 0, 0, 'footR')];
+    this.rig = { root, squash, body, model, lod: null, lodObjects: [scene], mohawks: collectMohawks(scene), hands: fists, feet, arms: [], legs: [], head: B('head') || model, cape: null };
+    this.fists = fists; this.shoulders = null;
+    this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
+    this.useGLB = true; this.useSkin = true; this.hipH = hipH;
+    if (this.def.style === 'fire') {
+      if (!this.glow) this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5);
+      body.add(this.glow); this.glow.position.set(0, 0.15, 0.12);
+    }
+    mixer.update(0);
+    return true;
+  }
+  // choose clip weights from game state, crossfade, then add aim offsets on top of the pose
+  animateSkin(dt, hs, fb) {
+    const A = this.anim, act = this.action, rd = this.ragdoll, acts = A.actions;
+    const tgt = {}; for (const n in acts) tgt[n] = 0;
+    const has = n => !!acts[n];
+    const drive = (n, t) => { const a = acts[n]; if (a) a.time = THREE.MathUtils.clamp(t, 0, a.getClip().duration - 1e-3); };
+    let over = null, overW = 0;
+    if (rd) {
+      if (rd.getUp > 0 && has('getup')) { tgt.getup = 1; drive('getup', Math.min(1, rd.getUp) * acts.getup.getClip().duration); }
+      else { const fl = Math.min(1, rd.flail); tgt.fall = fl; tgt.down = 1 - fl; }
+    } else {
+      if (this.state === 'ground') {
+        const run = Math.min(1, hs / 6); tgt.idle = 1 - run; tgt.run = run;
+        if (has('run')) acts.run.setEffectiveTimeScale(THREE.MathUtils.clamp(hs / (this.def.style === 'fire' ? 13 : 15), 0.7, 1.7));
+        if (this.charge > 0 && has('crouch')) { const c = Math.min(1, this.charge * 2); tgt.idle *= 1 - c; tgt.run *= 1 - c; tgt.crouch = c; drive('crouch', 0.42); }
+      } else if (this.state === 'air') tgt.air = 1;
+      else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
+      if (act && has(act.type)) {
+        over = act.type; overW = 1;
+        if (act.type === 'punch') drive('punch', act.t * 1.6);       // fist lands ~0.16 s (game hit window)
+        else if (act.type === 'blast') drive('blast', act.t);           // hand up by ~0.12 s, blast fires at 0.14 s
+        else if (act.type === 'tackle' && act.t < dt * 1.5) acts.tackle.time = 0;
+      } else if (this.knockT > 0 && has('hit')) { over = 'hit'; overW = 1; drive('hit', (0.45 - this.knockT) / 0.45 * acts.hit.getClip().duration); }
+      if (over) { for (const n in tgt) tgt[n] *= 1 - overW; tgt[over] = overW; }
+    }
+    const rate = over || rd ? 16 : 8;
+    let sum = 0;
+    for (const n in acts) { A.w[n] += ((tgt[n] || 0) - A.w[n]) * Math.min(1, dt * rate); if (A.w[n] < 1e-3) A.w[n] = 0; sum += A.w[n]; }
+    for (const n in acts) acts[n].setEffectiveWeight(sum > 0 ? A.w[n] / sum : (n === 'idle' ? 1 : 0));
+    A.mixer.update(dt);
+    // aim the striking arm at the target (pitch), compensating for whole-body lean
+    if (!rd && act && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
+      const k = A.w[act.type] / Math.max(sum, 1e-3);
+      const pitch = Math.asin(THREE.MathUtils.clamp(this.aim.y, -1, 1)) + this.rig.body.rotation.x;
+      const bone = A.upperArmR; this.rig.root.updateMatrixWorld(true);
+      this.rig.body.getWorldQuaternion(_q1); _ax.set(1, 0, 0).applyQuaternion(_q1);
+      bone.parent.getWorldQuaternion(_q2);
+      const qw = new THREE.Quaternion().setFromAxisAngle(_ax, -THREE.MathUtils.clamp(pitch, -1.3, 1.3) * k);
+      bone.quaternion.premultiply(_q2.clone().invert().multiply(qw).multiply(_q2));
+    }
+    // LOD: swap to the decimated meshes (same skeleton) when the camera is far
+    if (A.lod1.length) {
+      const cam = Hero.viewer; const d = cam ? cam.position.distanceTo(this.pos) : 0;
+      const low = this.qualityName === 'Low' ? d > 7 : d > 16;
+      if (low !== A.lowNow) { A.lowNow = low; for (const m of A.lod0) m.visible = !low; for (const m of A.lod1) m.visible = low; }
+    }
+  }
   setQuality(preset) { this.qualityName = preset?.name || 'High'; this.applyLodLevels(); }
   applyLodLevels() {
-    if (!this.useGLB || !this.rig.lod) return;
+    if (!this.useGLB || this.useSkin || !this.rig.lod) return;
     const lod = this.rig.lod, objs = this.rig.lodObjects;
     for (const l of lod.levels.slice()) { lod.remove(l.object); }
     lod.levels.length = 0;
@@ -503,7 +617,7 @@ export class Hero {
     this.landSquash += (1 - this.landSquash) * Math.min(1, dt * 8);
     this.leapStretch += (1 - this.leapStretch) * Math.min(1, dt * 5);
     r.root.position.copy(this.pos); r.root.rotation.y = this.yaw;
-    if (this.ragdoll && this.useGLB) { this.animateRagdoll(dt); return; }
+    if (this.ragdoll && this.useGLB) { this.animateRagdoll(dt); if (this.useSkin) this.animateSkin(dt, 0, 0); return; }
 
     if (this.useGLB) {
       const run = this.state === 'ground' ? Math.min(1, hs / 8) : 0;
@@ -516,7 +630,7 @@ export class Hero {
       r.squash.scale.y += airStretch;
       // Flight: Centurion nearly horizontal (80–90°), Tiger a shallower lean (60–70°). Bank with turns.
       const flyPitch = fire ? 1.13 : 1.48;
-      const runLean = run * 0.2;
+      const runLean = this.useSkin ? 0 : run * 0.2; // the run clip already leans into the sprint
       const chargeLean = this.charge * 0.5;
       const act = this.action;
       this.upright += ((act && act.type !== 'tackle' ? 1 : 0) - this.upright) * Math.min(1, dt * 10);
@@ -525,7 +639,7 @@ export class Hero {
       r.body.rotation.z = this.bank * (1 - this.upright);
       r.body.rotation.y = 0;
       r.body.position.y = this.hipH;
-      this.animateArms(dt, run, fb, r.body.rotation.x);
+      if (this.useSkin) this.animateSkin(dt, hs, fb); else this.animateArms(dt, run, fb, r.body.rotation.x);
       if (fire) this.fireFx(dt, fly);
       this.animateMohawk();
       return;
@@ -598,7 +712,7 @@ export class Hero {
     A.rx = Math.sin(t * 13.1) * 1.6 * fl - 1.2 * fl; A.lx = Math.sin(t * 11.3 + 1.7) * 1.6 * fl - 1.0 * fl;
     A.rz = 0.6 + Math.sin(t * 9.7) * 0.8 * fl; A.lz = 0.6 + Math.sin(t * 10.9 + 0.6) * 0.8 * fl;
     if (rd.getUp > 0) { const e = Math.min(1, rd.getUp); A.rx *= 1 - e; A.lx *= 1 - e; A.rz *= 1 - e; A.lz *= 1 - e; }
-    this.applyArms();
+    if (!this.useSkin) this.applyArms();
     if (this.def.style === 'fire') this.fireFx(dt, false);
     this.animateMohawk();
   }

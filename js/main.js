@@ -27,6 +27,7 @@ const city = new City(scene);
 const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
+Hero.viewer = camera; // used for the rigged models' LOD switch
 let idx = 0; heroes[0].setVisible(false); heroes[1].setVisible(false);
 heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 heroes[1].pos.set(-HALF + 20 * BLOCK + 9 + 40, 0, -HALF + 22 * BLOCK + 9); heroes[1].yaw = -Math.PI / 2;
