@@ -1,4 +1,4 @@
-// Tiny WebAudio synth (the game ships no sound files). The context is created/resumed on a user gesture.
+// Tiny WebAudio synth + one sample (Tiger's roar, assets/audio/tiger_roar.ogg/.m4a). The context is created/resumed on a user gesture.
 let ctx = null, master = null, noiseBuf = null;
 export function unlockAudio() {
   try {
@@ -10,7 +10,20 @@ export function unlockAudio() {
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     }
     if (ctx.state === 'suspended') ctx.resume();
+    loadRoar();
   } catch (e) { /* audio is optional */ }
+}
+// Temper Tiger's roar: a real tiger roar sample supplied by Ben (see assets/CREDITS.md); Ogg Vorbis, AAC fallback
+const roarState = { buf: null, loading: false, error: null, url: null };
+if (typeof window !== 'undefined') window.__roarSample = roarState;
+function loadRoar() {
+  if (roarState.buf || roarState.loading || !ctx) return; roarState.loading = true;
+  const a = document.createElement('audio'), ogg = a.canPlayType && a.canPlayType('audio/ogg; codecs="vorbis"');
+  const url = new URL('../assets/audio/tiger_roar.' + (ogg ? 'ogg' : 'm4a'), import.meta.url).href; roarState.url = url;
+  fetch(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+    .then(ab => new Promise((res, rej) => ctx.decodeAudioData(ab, res, rej)))
+    .then(b => { roarState.buf = b; roarState.duration = b.duration; }, e => { roarState.error = String(e?.message || e); })
+    .finally(() => { roarState.loading = false; });
 }
 function noise(t0, dur, type, f0, f1, gain, attack = 0.004) {
   const src = ctx.createBufferSource(); src.buffer = noiseBuf;
@@ -41,28 +54,34 @@ export function whooshSound(fire) {
   if (fire) noise(t + 0.02, 0.3, 'lowpass', 1800, 400, 0.35, 0.02);
 }
 
-// Tiger roar blast: a deep growl (detuned saws + sub, fluttered by an LFO, driven through a waveshaper) layered with a
-// looping fire roar (band-passed noise + low rumble). Returns a handle; stop() fades it out when the blast ends.
+// Tiger roar blast: the tiger roar sample (slight random pitch each time) layered over a looping fire roar
+// (band-passed noise + low rumble). Falls back to a synth growl if the sample hasn't loaded. stop() fades it all out.
 export function roarSound() {
   unlockAudio(); if (!ctx || ctx.state !== 'running') return null;
   const t = ctx.currentTime + 0.01, out = ctx.createGain();
   out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(0.85, t + 0.1); out.connect(master);
-  const shaper = ctx.createWaveShaper(), curve = new Float32Array(1024);
-  for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curve[i] = Math.tanh(3 * x); } shaper.curve = curve;
-  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 5; lp.frequency.setValueAtTime(380, t); lp.frequency.exponentialRampToValueAtTime(1100, t + 0.26);
-  const gG = ctx.createGain(); gG.gain.value = 0.5; shaper.connect(lp); lp.connect(gG); gG.connect(out);
   const srcs = [];
-  const flutter = ctx.createOscillator(), fG = ctx.createGain(); flutter.frequency.value = 24; fG.gain.value = 7; flutter.connect(fG); srcs.push(flutter);
-  const wob = ctx.createOscillator(), wG = ctx.createGain(); wob.frequency.value = 5.5; wG.gain.value = 260; wob.connect(wG); wG.connect(lp.frequency); srcs.push(wob);
-  for (const [type, f, d] of [['sawtooth', 56, 0], ['sawtooth', 84, 9], ['square', 28, 0]]) {
-    const o = ctx.createOscillator(); o.type = type; o.detune.value = d;
-    o.frequency.setValueAtTime(f * 0.8, t); o.frequency.exponentialRampToValueAtTime(f * 1.15, t + 0.24); o.frequency.exponentialRampToValueAtTime(f, t + 1.2); // wind-up then the snap
-    fG.connect(o.frequency); o.connect(shaper); srcs.push(o);
+  let roarG = null; // the roar sample plays out in full (~2 s) even if RT is released early; only the fire loop fades
+  if (roarState.buf) {
+    const r = ctx.createBufferSource(); r.buffer = roarState.buf; r.playbackRate.value = 0.93 + Math.random() * 0.14; // +-7% pitch
+    roarG = ctx.createGain(); roarG.gain.value = 1.15; r.connect(roarG); roarG.connect(master); r.start(t);
+    roarState.plays = (roarState.plays || 0) + 1;
+  } else {
+    const shaper = ctx.createWaveShaper(), curve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curve[i] = Math.tanh(3 * x); } shaper.curve = curve;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 5; lp.frequency.setValueAtTime(380, t); lp.frequency.exponentialRampToValueAtTime(1100, t + 0.26);
+    const gG = ctx.createGain(); gG.gain.value = 0.5; shaper.connect(lp); lp.connect(gG); gG.connect(out);
+    const flutter = ctx.createOscillator(), fG = ctx.createGain(); flutter.frequency.value = 24; fG.gain.value = 7; flutter.connect(fG); srcs.push(flutter);
+    for (const [type, f, d] of [['sawtooth', 56, 0], ['sawtooth', 84, 9], ['square', 28, 0]]) {
+      const o = ctx.createOscillator(); o.type = type; o.detune.value = d;
+      o.frequency.setValueAtTime(f * 0.8, t); o.frequency.exponentialRampToValueAtTime(f * 1.15, t + 0.24); o.frequency.exponentialRampToValueAtTime(f, t + 1.2);
+      fG.connect(o.frequency); o.connect(shaper); srcs.push(o);
+    }
   }
   const nz = ctx.createBufferSource(); nz.buffer = noiseBuf; nz.loop = true; srcs.push(nz);
   const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.6; bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(1300, t + 0.3);
   const rum = ctx.createBiquadFilter(); rum.type = 'lowpass'; rum.frequency.value = 220;
-  const nG = ctx.createGain(); nG.gain.setValueAtTime(0.0001, t); nG.gain.exponentialRampToValueAtTime(0.7, t + 0.28);
+  const nG = ctx.createGain(); nG.gain.setValueAtTime(0.0001, t); nG.gain.exponentialRampToValueAtTime(roarG ? 0.45 : 0.7, t + 0.28); // fire sits under the roar
   const rG = ctx.createGain(); rG.gain.value = 0.6;
   nz.connect(bp); bp.connect(nG); nG.connect(out); nz.connect(rum); rum.connect(rG); rG.connect(out);
   for (const s of srcs) s.start(t);

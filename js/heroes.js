@@ -168,7 +168,7 @@ export const HERO_DEFS = {
 };
 
 // Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
-const SUPER_MULT = 2.5;
+const SUPER_MULT = 1.9; // was 2.5 (800 m/s); Ben: "a little slower" -> 608 m/s
 // Tiger's flight jets: an open flaring plume (narrow nozzle at the fist/boot, widening behind), base at origin, tail at +Y
 const PLUME_GEO = (() => { const g = new THREE.CylinderGeometry(0.3, 0.075, 1, 18, 10, true); g.translate(0, 0.5, 0); return g; })();
 // heat: 0 = idle flicker ... 1 = full boost ... ~2.5 = sonic-boom afterburner. Colour runs orange -> yellow -> white-hot with a
@@ -678,6 +678,7 @@ export class Hero {
         if (has('run')) acts.run.setEffectiveTimeScale(THREE.MathUtils.clamp(hs / (this.def.style === 'fire' ? 13 : 15), 0.7, 1.7));
         if (this.charge > 0 && has('crouch')) { const c = Math.min(1, this.charge * 2); tgt.idle *= 1 - c; tgt.run *= 1 - c; tgt.crouch = c; drive('crouch', 0.42); }
       } else if (this.state === 'air') tgt.air = 1;
+      else if (act && act.beam) { tgt.fly_hover = 1; } // beam in flight: the body stands upright, so drop the cruise pose (Centurion's raised fist) and brace in the hover stance
       else if (has('fly_boost')) { const bz = this.boostBlend; tgt.fly_hover = 1 - fb; tgt.fly_fast = fb * (1 - bz); tgt.fly_boost = fb * bz; } // Tiger: hover -> cruise -> full burn
       else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
       const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
@@ -905,7 +906,7 @@ export class Hero {
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
       const spd = this.grabbing ? act.carrySpeed : d.tackleSpeed;
       const dir = this.grabbing ? act.carryDir : this.aim;
-      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : 9)));
+      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : act.homing ? 15 : 9))); // homing tackles follow the re-aimed direction tightly
     }
     // punch dash: drive straight at the target at dash speed (combat.dashStep re-aims and ends it)
     if (act && act.type === 'punch' && act.dash && !stun) {
@@ -1140,7 +1141,7 @@ export class Hero {
     const jet = !this.ragdoll && (fly || (this.state === 'air' && this.vel.y > 6));
     // jet intensity: rises continuously with speed, peaks hard on the sonic boom / super speed, gentle flicker when hovering
     const sp = this.vel.length(), spN = sp / this.def.flyBoost;
-    const want = jet ? 0.22 + 0.78 * Math.min(1, spN) + 0.5 * THREE.MathUtils.clamp(spN - 1, 0, 1.5) + (this.superSpeed ? 0.15 : 0) + 1.2 * (this.jetKick || 0) : 0;
+    const want = jet ? 0.22 + 0.78 * Math.min(1, spN) + 0.5 * THREE.MathUtils.clamp(spN - 1, 0, 1.5) + (this.superSpeed ? 0.45 : 0) + 1.2 * (this.jetKick || 0) : 0;
     this.jetI += (want - this.jetI) * Math.min(1, dt * (want > this.jetI ? 10 + 25 * (this.jetKick || 0) : 4)); // the boom slams the jets open instantly
     const I = this.jetI, flick = 1 + (0.1 + 0.12 * Math.max(0, 0.6 - I)) * Math.sin(this.t * 23) + 0.06 * Math.sin(this.t * 41.7) + 0.05 * Math.random();
     if (this.glow) {

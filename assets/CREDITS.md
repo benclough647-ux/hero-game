@@ -19,3 +19,7 @@ All city art is original and generated in code at load time: no third-party text
 - **Building facades:** glass curtain wall, concrete office, brick and painted stucco, plus shopfronts and signs, weathering, window recesses, blinds and lit interiors. All of it is a procedural shader in `js/facade.js`.
 - **Props:** street lamps, traffic signals, benches, bins, hydrants, rooftop water tanks, vents, masts, AC units, plant rooms, parapets, cornices, awnings and trees are built from Three.js primitives in `js/city.js`.
 - **Visual reference:** GTA V's city was used only as a look-and-feel reference. Nothing was copied from it.
+
+# Audio credits
+- **`audio/tiger_roar.ogg` / `audio/tiger_roar.m4a`** (Temper Tiger's RT roar blast): a real tiger roar taken from a short video clip supplied by Ben (2.0 s .mov, 16 Nov 2026). The whole roar, 0.00–1.95 s, was used: mono 44.1 kHz, 55 Hz high-pass, light FFT denoise, 20 ms fade-in and 0.3 s fade-out, loudness-normalised to -14 LUFS. Ben supplied it for use in this game.
+- All other sounds (sonic boom, whooshes, fire, jets, impacts) are synthesised live with WebAudio in `js/audio.js`.

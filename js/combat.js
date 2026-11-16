@@ -10,6 +10,9 @@ const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
 // punch dash: very fast lunge over a short distance, then the strike lands
+// tackle homing (the lunge that turns into the choke grab): locked = strong steering, unlocked = aim-assist steering when the
+// rival is roughly in front; both lead a moving target. Player catch radius is larger than the AI's (swept test, metres).
+export const TACKLE = { assistCone: 0.5, assistRange: 220, lockTurn: 16, assistTurn: 7, assistMinDot: 0.15, lead: 0.6, catchR: 2.6, playerCatchR: 3.6 };
 // choke grab (tackle connects): hold time, charged punch / spin throw / forward drive tuning
 export const CHOKE = { hold: 5, chargeT: 1.0, spinT: 0.85, spinTurns: 1.5, throwSpeed: 220, driveStick: 0.6 };
 // Centurion eye beam (player only): charge-up, sustained beam while RT is held, push + tumble scaled by beam time
@@ -274,7 +277,13 @@ export class Combat {
         if (lock) this.start(player, 'punch', toE(), enemy);
         else { const a = this.aimAt(player, enemy, fwd, 0.8, DASH.assist); const assist = !enemy.ko && (a.dot(fwd) < 0.9999 || this.chest(enemy, V()).distanceTo(this.chest(player, V())) < 5); this.start(player, 'punch', a, assist ? enemy : null); }
       }
-      else if (inp.tacklePressed) this.start(player, 'tackle', lock ? toE() : this.aimAt(player, enemy, fwd, 0.75, 160), lock ? enemy : null);
+      else if (inp.tacklePressed) {
+        if (lock) this.start(player, 'tackle', toE(), enemy);
+        else { // aim assist: if the rival is roughly in front, snap to them and keep (softer) homing on during the lunge
+          const a = this.aimAt(player, enemy, fwd, TACKLE.assistCone, TACKLE.assistRange), assist = !enemy.ko && a.dot(fwd.clone().normalize()) < 0.9999;
+          if (this.start(player, 'tackle', a, assist ? enemy : null) && assist) player.action.soft = true;
+        }
+      }
     }
     for (const [a, b] of [[player, enemy], [enemy, player]]) this.actionStep(dt, a, b);
     this.updateProjectiles(dt, [player, enemy]);
@@ -302,16 +311,19 @@ export class Combat {
     }
     if (act.type === 'tackle') {
       // homing: steer the drive toward a locked target in 3D
-      if (!a.grabbing && act.target && !act.target.ko) {
-        const to = this.chest(act.target, t1).sub(this.chest(a, t2)).normalize();
-        a.aim.lerp(to, 1 - Math.exp(-dt * 9)).normalize();
+      if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy) {
+        // lead the target: aim where it will be when we arrive (capped), so a moving / strafing rival can still be caught
+        const tc = this.chest(act.target, t1), ac = this.chest(a, t2), dist = tc.distanceTo(ac);
+        const tti = Math.min(TACKLE.lead, dist / Math.max(a.def.tackleSpeed, a.vel.length(), 1));
+        const to = tc.addScaledVector(act.target.vel, tti).sub(ac).normalize();
+        if (!act.soft || to.dot(a.aim) > TACKLE.assistMinDot) { a.aim.lerp(to, 1 - Math.exp(-dt * (act.soft ? TACKLE.assistTurn : TACKLE.lockTurn))).normalize(); act.homing = true; }
       }
       if (!a.grabbing && !b.ko && !b.ragdoll) {
         // swept test (at 250+ m/s the attacker moves several metres per frame)
         const cb = this.chest(b, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(b.vel).multiplyScalar(dt), L = rel.length();
         const c0 = t4.copy(c1).sub(rel); let d;
         if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
-        if (d < 2.6) this.grab(a, b);
+        if (d < (a === this.player ? TACKLE.playerCatchR : TACKLE.catchR)) this.grab(a, b);
       }
       if (a.grabbing) {
         act.grabT = (act.grabT || 0) + dt;

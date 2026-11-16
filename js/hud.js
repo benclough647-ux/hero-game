@@ -4,7 +4,7 @@ export class HUD {
     this.charge = document.getElementById('charge'); this.bar = this.charge.firstElementChild; this.hint = document.getElementById('hint'); this.toast = document.getElementById('toast'); this.lastPad = null; this.visible = false; this.toastT = 0; }
   // minimal combat health bars, only shown while a fight is on
   bars(player, enemy, show, dt) {
-    if (!this.barEl) { this.barEl = document.getElementById('bars'); this.pBar = document.getElementById('pBar'); this.eBar = document.getElementById('eBar'); this.pName = document.getElementById('pName'); this.eName = document.getElementById('eName'); this.op = 0; }
+    if (!this.barEl) { this.barEl = document.getElementById('bars'); this.pBar = document.getElementById('pBar'); this.eBar = document.getElementById('eBar'); this.pName = document.getElementById('pName'); this.eName = document.getElementById('eName'); this.pHp = document.getElementById('pHp'); this.eHp = document.getElementById('eHp'); this.op = 0; }
     if (!this.barEl) return;
     this.op += ((show ? 1 : 0) - this.op) * Math.min(1, dt * 4);
     this.barEl.style.opacity = this.op.toFixed(3); this.barEl.style.display = this.op < 0.01 ? 'none' : 'flex';
@@ -13,6 +13,7 @@ export class HUD {
     this.pBar.style.width = Math.max(0, 100 * player.hp / player.maxHp) + '%'; this.eBar.style.width = Math.max(0, 100 * enemy.hp / enemy.maxHp) + '%';
     this.pBar.style.background = col(player); this.eBar.style.background = col(enemy);
     this.pName.textContent = player.def.name; this.eName.textContent = enemy.def.name;
+    if (this.pHp) { this.pHp.textContent = Math.max(0, Math.ceil(player.hp)); this.eHp.textContent = Math.max(0, Math.ceil(enemy.hp)); }
   }
   // choke-grab timer bar + prompts (always shown, even with the HUD hidden)
   grab(st, pad, fire) {
