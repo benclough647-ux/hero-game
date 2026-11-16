@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { sonicBoomSound } from './audio.js';
+import { sonicBoomSound, jetSound } from './audio.js';
 // Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
 // and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -169,7 +169,22 @@ export const HERO_DEFS = {
 
 // Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
 const SUPER_MULT = 2.5;
-const JET_GEO = (() => { const g = new THREE.ConeGeometry(0.1, 1, 14, 4, true); g.translate(0, 0.5, 0); return g; })(); // base at origin, tip at +Y
+// Tiger's flight jets: an open flaring plume (narrow nozzle at the fist/boot, widening behind), base at origin, tail at +Y
+const PLUME_GEO = (() => { const g = new THREE.CylinderGeometry(0.3, 0.075, 1, 18, 10, true); g.translate(0, 0.5, 0); return g; })();
+// heat: 0 = idle flicker ... 1 = full boost ... ~2.5 = sonic-boom afterburner. Colour runs orange -> yellow -> white-hot with a
+// blue core at high heat; the plume swells and roils harder as heat rises. core = 1 for the inner white/blue cone.
+const jetMat = (core) => new THREE.ShaderMaterial({ uniforms: { t: { value: 0 }, heat: { value: 0 }, core: { value: core } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+  vertexShader: `varying vec2 vUv; varying float vFac; uniform float t, heat, core; void main(){ vUv = uv; vec3 p = position; float k = uv.y;
+    float sw = 1.0 + (0.55 + 0.35 * core) * heat * k * (1.0 - 0.5 * k) + 0.12 * sin(t * 27.0 + k * 13.0 + p.x * 40.0) * k * (0.6 + heat);
+    p.xz *= sw; p.x += sin(t * 17.0 + k * 9.0) * 0.035 * k * (1.0 + heat); p.z += cos(t * 13.0 + k * 7.0) * 0.03 * k * (1.0 + heat);
+    vec4 mv = modelViewMatrix * vec4(p, 1.0); vec3 n = normalize(normalMatrix * normal); vFac = abs(dot(n, normalize(-mv.xyz))); gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying vec2 vUv; varying float vFac; uniform float t, heat, core; void main(){ float y = vUv.y;
+    float n = sin(y * 18.0 - t * (24.0 + 14.0 * heat) + vUv.x * 31.4) * 0.5 + 0.5, n2 = sin(y * 7.0 - t * 15.0 - vUv.x * 12.566) * 0.5 + 0.5;
+    float a = pow(1.0 - y, 1.1 + core) * (0.5 + 0.5 * n * n2) * pow(vFac, 1.4) * smoothstep(0.0, 0.06, y + 0.02);
+    float h = clamp(heat, 0.0, 2.5);
+    vec3 hot = mix(vec3(6.0, 3.6, 1.1), vec3(6.5, 5.6, 4.2), smoothstep(0.5, 1.4, h)); hot = mix(hot, vec3(3.6, 4.6, 8.0), smoothstep(1.2, 2.2, h) * core);
+    vec3 c = mix(hot, vec3(4.5, 1.2, 0.18), smoothstep(0.05 + 0.2 * h, 0.55 + 0.25 * h, y)); c = mix(c, vec3(2.2, 0.25, 0.04), smoothstep(0.6, 1.0, y));
+    a *= (0.75 + 0.4 * min(h, 1.6)) * (core > 0.5 ? 1.3 : 1.0); gl_FragColor = vec4(c * a, a); }` });
 const NO_INP = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
 const _v = new THREE.Vector3();
 const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; };
@@ -317,7 +332,7 @@ export async function preloadHeroModels(onProgress) {
   return result;
 }
 
-const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'tackle', 'fall', 'down']);
+const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down']);
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
 const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch']);
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
@@ -477,6 +492,9 @@ const BEAM_MOVES = {
   fire: { clip: 'roar_blast', poses: [ROAR_WINDUP_POSE, ROAR_POSE], times: [0, 0.13, 0.24, 0.46, 0.68], frames: [[-1, 1], [0, 1], [1, 1], [1, 0.88], [1, 1]], loop: [0.24, 0.44] },
 };
 const _hb = new THREE.Vector3(), _hf = new THREE.Vector3(), _hq = new THREE.Quaternion(), _hq2 = new THREE.Quaternion();
+const _jq = new THREE.Quaternion(), _jup = new THREE.Vector3(0, 1, 0), _jp = new THREE.Vector3(), _jv = new THREE.Vector3();
+// jet particle colours: yellow, red tail, white-hot, blue core, ember start/end, heat-haze start/end
+const _jc = [[3.2, 1.5, 0.3], [2.0, 0.25, 0.03], [3.6, 3.0, 2.2], [1.6, 2.4, 4.2], [1.8, 0.5, 0.07], [0.3, 0.04, 0.0], [0.3, 0.15, 0.06], [0.05, 0.035, 0.03]].map(c => new THREE.Color(...c));
 
 export class Hero {
   constructor(key, scene, effects) {
@@ -493,8 +511,12 @@ export class Hero {
     this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
     this.superSpeed = false; this.superT = 0; this.superIdle = 0; this.boomKick = 0; this.visibleFlag = true;
     if (this.def.style === 'fire') { // world-space flame jets that follow the hand/foot anchors
-      this.jetMat = flameMat(); this.jets = [];
-      for (let i = 0; i < 4; i++) { const m = new THREE.Mesh(JET_GEO, this.jetMat); m.frustumCulled = false; m.castShadow = false; m.visible = false; m.renderOrder = 3; scene.add(m); this.jets.push(m); }
+      this.jetMat = jetMat(0); this.jetCoreMat = jetMat(1); this.jets = []; this.jetCores = []; this.jetI = 0; this.jetLen = 0; this.jetRate = 0; this.boostBlend = 0;
+      for (let i = 0; i < 4; i++) {
+        const m = new THREE.Mesh(PLUME_GEO, this.jetMat), c = new THREE.Mesh(PLUME_GEO, this.jetCoreMat);
+        for (const x of [m, c]) { x.frustumCulled = false; x.castShadow = false; x.visible = false; scene.add(x); }
+        m.renderOrder = 3; c.renderOrder = 4; this.jets.push(m); this.jetCores.push(c);
+      }
     }
     if (this.def.style === 'fire') { this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5); this.rig.body.add(this.glow); this.glow.position.y = 0.4; }
   }
@@ -503,12 +525,12 @@ export class Hero {
     if (this.def.style === 'fire') { if (this.state === 'ground') { this.vel.y = 30; this.fireBurst(this.pos, 40, 12); } this.startFly(); }
     else { if (this.state === 'ground') this.takeOff(); else this.state = 'fly'; }
   }
-  setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (!v && this.jets) for (const j of this.jets) j.visible = false; }
+  setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (!v && this.jets) for (const j of [...this.jets, ...this.jetCores]) j.visible = false; }
   // LS while flying: sonic boom, then super speed until you stop flying, let go of the stick, slow down, or press LS again
   sonicBoom(cam) {
     const fire = this.def.style === 'fire';
     const dir = this.vel.lengthSq() > 25 ? this.vel.clone().normalize() : (cam?.forward ? cam.forward.clone() : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)));
-    this.superSpeed = true; this.superT = 0; this.superIdle = 0; this.boomKick = 1;
+    this.superSpeed = true; this.superT = 0; this.superIdle = 0; this.boomKick = 1; this.jetKick = 1;
     this.vel.addScaledVector(dir, this.def.flyBoost * 0.6);
     this.fx.sonicBoom(this.pos.clone().add(new THREE.Vector3(0, 0.4, 0)), dir, { fire, follow: this.pos });
     if (fire) this.fireBurst(this.pos, 120, 30);
@@ -607,6 +629,10 @@ export class Hero {
     this.rig = { root, squash, body, model, lod: null, lodObjects: [scene], mohawks: collectMohawks(scene), hands: fists, feet, arms: [], legs: [], head: B('head') || model, cape: null };
     this.fists = fists; this.shoulders = null;
     this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
+    if (this.def.style === 'fire') { // flight thrusters: fists (aimed along the forearms) + boot soles (aimed along the shins)
+      const sole = s => attach(B('foot.' + s) || B('toe.' + s), 0, 0.02 * k, 0, 'sole' + s);
+      this.jetSrc = [[fists[0], B('forearm.R')], [fists[1], B('forearm.L')], [sole('L'), B('shin.L')], [sole('R'), B('shin.R')]];
+    }
     mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
     const BM = BEAM_MOVES[this.def.style];
     if (BM && B('head')) {
@@ -646,6 +672,7 @@ export class Hero {
         if (has('run')) acts.run.setEffectiveTimeScale(THREE.MathUtils.clamp(hs / (this.def.style === 'fire' ? 13 : 15), 0.7, 1.7));
         if (this.charge > 0 && has('crouch')) { const c = Math.min(1, this.charge * 2); tgt.idle *= 1 - c; tgt.run *= 1 - c; tgt.crouch = c; drive('crouch', 0.42); }
       } else if (this.state === 'air') tgt.air = 1;
+      else if (has('fly_boost')) { const bz = this.boostBlend; tgt.fly_hover = 1 - fb; tgt.fly_fast = fb * (1 - bz); tgt.fly_boost = fb * bz; } // Tiger: hover -> cruise -> full burn
       else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
       const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
       if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
@@ -961,6 +988,11 @@ export class Hero {
     const r = this.rig, fly = this.state === 'fly', fire = this.def.style === 'fire', sp = this.vel.length();
     this.flyBlend += ((fly ? Math.min(1, sp / 25) : 0) - this.flyBlend) * Math.min(1, dt * 4);
     const fb = this.flyBlend;
+    if (fire) { // 0 = cruising ... 1 = full burn (boost speed and above, or the sonic boom); drives the fly_boost clip + body pitch
+      const bt = fly ? (this.superSpeed ? 1 : THREE.MathUtils.clamp((sp - 120) / (this.def.flyBoost - 160), 0, 1)) : 0;
+      this.boostBlend += (bt - this.boostBlend) * Math.min(1, dt * 3);
+    }
+    this.jetKick = Math.max(0, (this.jetKick || 0) - dt * 1.1); // sonic-boom afterburner spike (boomKick is consumed by the camera)
     const climb = fly && sp > 1 ? Math.asin(THREE.MathUtils.clamp(this.vel.y / sp, -1, 1)) : 0;
     this.landSquash += (1 - this.landSquash) * Math.min(1, dt * 8);
     this.leapStretch += (1 - this.leapStretch) * Math.min(1, dt * 5);
@@ -978,7 +1010,7 @@ export class Hero {
       const airStretch = this.state === 'air' && this.vel.y > 8 ? THREE.MathUtils.clamp(this.vel.y / 80, 0, 0.12) : 0;
       r.squash.scale.y += airStretch;
       // Flight: Centurion nearly horizontal (80–90°), Tiger a shallower lean (60–70°). Bank with turns.
-      const flyPitch = fire ? 1.13 : 1.48;
+      const flyPitch = fire ? 1.0 + 0.25 * this.boostBlend : 1.48; // Tiger: chest-up jet stance when cruising, flatter at full burn
       const runLean = this.useSkin ? 0 : run * 0.2; // the run clip already leans into the sprint
       const chargeLean = this.charge * 0.5;
       const act = this.action;
@@ -1100,31 +1132,71 @@ export class Hero {
     if (!this.useGLB && r.head && Math.random() < 0.5) { r.head.localToWorld(w.set(0, 0.2, 0)); fx.emit(w, v.set(0, 3, 0).add(this.vel), 0.25, yel, red); }
     if (this.charge > 0) for (const h of [...r.hands, ...r.feet]) { h.getWorldPosition(w); fx.emit(w, v.set((Math.random() - .5) * 3, 2 + Math.random() * 3, (Math.random() - .5) * 3), 0.35, yel, red); }
     const jet = !this.ragdoll && (fly || (this.state === 'air' && this.vel.y > 6));
-    if (this.glow) this.glow.intensity += ((jet ? 60 : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 6);
-    // jet direction: opposite to travel (straight down when hovering)
-    const back = this.vel.clone(); const sp = back.length(); if (sp > 3) back.multiplyScalar(-1 / sp); else back.set(0, -1, 0);
+    // jet intensity: rises continuously with speed, peaks hard on the sonic boom / super speed, gentle flicker when hovering
+    const sp = this.vel.length(), spN = sp / this.def.flyBoost;
+    const want = jet ? 0.22 + 0.78 * Math.min(1, spN) + 0.5 * THREE.MathUtils.clamp(spN - 1, 0, 1.5) + (this.superSpeed ? 0.15 : 0) + 1.2 * (this.jetKick || 0) : 0;
+    this.jetI += (want - this.jetI) * Math.min(1, dt * (want > this.jetI ? 10 + 25 * (this.jetKick || 0) : 4)); // the boom slams the jets open instantly
+    const I = this.jetI, flick = 1 + (0.1 + 0.12 * Math.max(0, 0.6 - I)) * Math.sin(this.t * 23) + 0.06 * Math.sin(this.t * 41.7) + 0.05 * Math.random();
+    if (this.glow) {
+      this.glow.intensity += ((jet ? (22 + 55 * I) * flick : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 8);
+      this.glow.distance = 30 + 18 * Math.min(2, I); this.glow.color.setRGB(1, 0.38 + 0.3 * Math.min(1, I / 2), 0.12 + 0.45 * THREE.MathUtils.clamp(I - 1, 0, 1));
+    }
+    this.jetAudio(I * (jet ? 1 : 0));
+    // jet direction: opposite to travel (straight down when hovering), steered by the limb it comes out of
+    const back = this.vel.clone(); if (sp > 3) back.multiplyScalar(-1 / sp); else back.set(0, -1, 0);
+    const anchors = [...r.hands, ...r.feet], src = this.useSkin && this.jetSrc, dirs = this._jd || (this._jd = [V(), V(), V(), V()]);
+    for (let i = 0; i < 4; i++) {
+      const d = dirs[i];
+      if (src && src[i][1]) { src[i][1].getWorldQuaternion(_jq); d.set(0, 1, 0).applyQuaternion(_jq).addScaledVector(back, 0.3 + 0.9 * Math.min(1, sp / 220)).normalize(); }
+      else d.copy(back);
+    }
     if (this.jets) {
-      const anchors = [...r.hands, ...r.feet], show = this.visibleFlag && (jet || this.charge > 0.05);
-      this.jetMat.uniforms.t.value = this.t;
+      const show = this.visibleFlag && (jet || this.charge > 0.05);
+      for (const M of [this.jetMat, this.jetCoreMat]) { M.uniforms.t.value = this.t; M.uniforms.heat.value = jet ? I : 0.1; }
+      this.jetLen = 0;
       for (let i = 0; i < this.jets.length; i++) {
-        const m = this.jets[i], a = anchors[i];
-        if (!show || !a) { m.visible = false; continue; }
-        a.getWorldPosition(m.position); m.visible = true;
-        const dirv = jet ? back : V(0, 1, 0);
-        m.quaternion.setFromUnitVectors(V(0, 1, 0), dirv);
-        const fl = 0.85 + 0.25 * Math.sin(this.t * 31 + i * 1.7) + 0.1 * Math.random();
-        const len = jet ? (i < 2 ? 0.9 : 0.75) * (1 + Math.min(2.4, sp / 70)) * (this.superSpeed ? 1.6 : 1) : 0.35 + this.charge * 0.4;
-        const rad = (i < 2 ? 1.5 : 1.25) * (this.superSpeed ? 1.3 : 1);
-        m.scale.set(rad * fl, len * fl, rad * fl);
+        const m = this.jets[i], c = this.jetCores[i], a = src ? src[i][0] : anchors[i];
+        if (!show || !a) { m.visible = c.visible = false; continue; }
+        a.getWorldPosition(m.position); c.position.copy(m.position); m.visible = c.visible = true;
+        m.quaternion.setFromUnitVectors(_jup, jet ? dirs[i] : _jup); c.quaternion.copy(m.quaternion);
+        const fl = flick * (0.92 + 0.12 * Math.sin(this.t * 31 + i * 1.7) + 0.06 * Math.random()), foot = i < 2 ? 1 : 0.75;
+        const len = jet ? (0.7 + 3.4 * I) * foot : 0.35 + this.charge * 0.4, rad = jet ? (0.8 + 0.35 * Math.min(2, I)) * foot : 0.6;
+        m.scale.set(rad * fl, len * fl, rad * fl); c.scale.set(rad * 0.42 * fl, len * (0.45 + 0.08 * Math.min(2, I)) * fl, rad * 0.42 * fl);
+        this.jetLen = Math.max(this.jetLen, len);
       }
     }
-    if (!jet) return;
-    // particle jets from hands and feet, pushed opposite to travel + trail
-    const n = Math.ceil(dt * 420);
-    for (const h of [...r.hands, ...r.feet]) for (let i = 0; i < n / 2; i++) {
-      h.getWorldPosition(w); w.addScaledVector(this.vel, -Math.random() * dt);
-      v.copy(back).multiplyScalar(10 + Math.random() * 8).add(V((Math.random() - .5) * 4, (Math.random() - .5) * 4, (Math.random() - .5) * 4)).addScaledVector(this.vel, 0.85);
-      fx.emit(w, v, 0.15 + Math.random() * 0.25, Math.random() < 0.25 ? wht : yel, red);
+    if (!jet) { this.jetRate = 0; return; }
+    // particle jets, pushed out along each thruster + trail; denser, faster and hotter with intensity
+    const low = this.qualityName === 'Low' ? 0.5 : 1, rate = Math.min(700, 50 + 250 * I) * low; this.jetRate = rate * 4;
+    this._jAcc = (this._jAcc || 0) + rate * dt; const n = Math.floor(this._jAcc); this._jAcc -= n;
+    const blu = _jc[3], hotP = THREE.MathUtils.clamp(0.15 + 0.3 * I, 0, 0.8);
+    for (let k = 0; k < 4; k++) {
+      const h = src ? src[k][0] : anchors[k]; if (!h) continue; h.getWorldPosition(_jp); const d = dirs[k], foot = k < 2 ? 1 : 0.7;
+      for (let i = 0; i < n * foot; i++) {
+        w.copy(_jp).addScaledVector(this.vel, -Math.random() * dt);
+        const s = (12 + 24 * I) * (0.7 + 0.6 * Math.random()), sprd = 1.5 + 1.8 * I;
+        v.copy(d).multiplyScalar(s).add(_jv.set((Math.random() - .5) * sprd, (Math.random() - .5) * sprd, (Math.random() - .5) * sprd)).addScaledVector(this.vel, 0.85);
+        const r0 = Math.random();
+        fx.emit(w, v, (0.12 + Math.random() * 0.22) * (0.8 + 0.25 * Math.min(2, I)), r0 < hotP * 0.35 && I > 1.2 ? blu : r0 < hotP ? _jc[2] : _jc[0], _jc[1]);
+      }
+      // embers: a few long-lived sparks shed from the plume
+      if (Math.random() < dt * (3 + 14 * I) * foot) {
+        w.copy(_jp).addScaledVector(d, Math.random() * 0.6 * (0.55 + 3.1 * I));
+        v.copy(d).multiplyScalar(4 + 6 * Math.random()).add(_jv.set((Math.random() - .5) * 6, 1 + Math.random() * 4, (Math.random() - .5) * 6)).addScaledVector(this.vel, 0.9);
+        this.fx.spark.emit(w, v, 0.5 + Math.random() * 0.6, _jc[4], _jc[5]);
+      }
+      // heat shimmer: faint dim haze rising off the plume (no smoke)
+      if (low > 0.5 && Math.random() < dt * (2 + 10 * I)) {
+        w.copy(_jp).addScaledVector(d, (0.3 + Math.random()) * (0.55 + 3.1 * I) * 0.6);
+        fx.emit(w, v.set((Math.random() - .5) * 2, 2 + Math.random() * 3, (Math.random() - .5) * 2).addScaledVector(this.vel, 0.7), 0.4 + Math.random() * 0.4, _jc[6], _jc[7]);
+      }
     }
+  }
+  // looping flame roar for the hero you control; volume/brightness follow the jet intensity
+  jetAudio(level) {
+    const mine = Hero.audioHero === this && this.visibleFlag;
+    if (!mine || level < 0.01) { if (this.jetSnd) this.jetSnd.set(0); return; }
+    if (!this.jetSnd) { this.jetSnd = jetSound(); if (!this.jetSnd) return; }
+    this.jetSnd.set(level);
   }
 }

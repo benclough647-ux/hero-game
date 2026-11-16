@@ -137,7 +137,8 @@ clips['punch'] = retarget('Punch_Cross_Rig', 'punch', 0, 20)
 clips['hit'] = retarget('Hit_Chest_Rig', 'hit', hip_xy=False)
 # hover: upright, legs dangling, slow bob
 def hover_pose(ph):
-    sp = 0.62 if TIGER else 0.42
+    if TIGER: return endeavor_hover(ph)
+    sp = 0.42
     d = {}
     for sd in 'LR':
         s = s_(sd); fwd = -0.18 if sd == 'L' else 0.12
@@ -149,22 +150,61 @@ def hover_pose(ph):
         d[f'foot.{sd}'] = [('aim', (0, -0.55, -0.7))]
     d['spine'] = [('rot', X, 3)]; d['head'] = [('rot', X, -3)]
     return pose(d)
+# ---- Temper Tiger: jet-propulsion flight (fists are the thrusters; armature space: +X = his left, -Y = forward, +Z = up) ----
+# The game pitches the whole body forward in flight, so body-space "down and a bit back" becomes world "straight back".
+def endeavor_hover(ph):
+    """hovering on the jets: chest up, fists driven down and out beside the hips, one knee drawn up, the other leg hanging"""
+    d = {}; b = math.sin(ph); b2 = math.sin(ph + 1.3)
+    for sd in 'LR':
+        s = s_(sd); k = b if sd == 'L' else b2
+        d[f'shoulder.{sd}'] = [('rot', Y, -4 * s)]
+        d[f'upper_arm.{sd}'] = [('aim', (s * (0.48 + 0.04 * k), 0.24, -1))]
+        d[f'forearm.{sd}'] = [('aim', (s * 0.3, 0.14 + 0.03 * k, -1))]
+        d[f'hand.{sd}'] = [('aim', (s * 0.26, 0.1, -1))]
+    d['thigh.L'] = [('aim', (0.14, -0.55 + 0.05 * b, -0.85))]; d['shin.L'] = [('aim', (0.04, 0.42, -1))]
+    d['thigh.R'] = [('aim', (-0.1, 0.02 + 0.04 * b2, -1))]; d['shin.R'] = [('aim', (-0.02, 0.22, -1))]
+    for sd in 'LR': d[f'foot.{sd}'] = [('aim', (0, -0.15, -1))]
+    d['spine'] = [('rot', X, 5)]; d['chest'] = [('rot', X, -4)]; d['upper_chest'] = [('rot', X, -4)]
+    d['neck'] = [('rot', X, -2)]; d['head'] = [('rot', X, -4)]
+    return pose(d)
+def endeavor_cruise(ph=0.0):
+    """cruising: chest thrust out, shoulders back, arms driven out and back behind him (jets streaming straight back),
+    head up, legs trailing with the right knee bent"""
+    d = {}
+    for sd in 'LR':
+        s = s_(sd)
+        d[f'shoulder.{sd}'] = [('rot', Y, -10 * s)]
+        d[f'upper_arm.{sd}'] = [('aim', (s * 0.58, 0.48, -0.85))]
+        d[f'forearm.{sd}'] = [('aim', (s * 0.42, 0.44, -0.9))]
+        d[f'hand.{sd}'] = [('aim', (s * 0.34, 0.44, -0.9))]
+        d[f'foot.{sd}'] = [('aim', (0, 0.25, -1))]
+    d['thigh.L'] = [('aim', (0.12, 0.14, -1))]; d['shin.L'] = [('aim', (0.05, 0.3, -1))]
+    d['thigh.R'] = [('aim', (-0.1, -0.12, -1))]; d['shin.R'] = [('aim', (-0.02, 0.95, -0.55))]
+    d['spine'] = [('rot', X, -5)]; d['chest'] = [('rot', X, -8)]; d['upper_chest'] = [('rot', X, -7)]
+    d['neck'] = [('rot', X, -16)]; d['head'] = [('rot', X, -24)]
+    return pose(d)
+def endeavor_boost():
+    """full burn: arms locked straight back like twin afterburners, fists clenched, legs together and streamlined, head driven forward"""
+    d = {}
+    for sd in 'LR':
+        s = s_(sd)
+        d[f'shoulder.{sd}'] = [('rot', Y, -14 * s)]
+        d[f'upper_arm.{sd}'] = [('aim', (s * 0.4, 0.36, -0.93))]
+        d[f'forearm.{sd}'] = [('aim', (s * 0.3, 0.34, -0.95))]
+        d[f'hand.{sd}'] = [('aim', (s * 0.26, 0.34, -0.95))]
+        d[f'thigh.{sd}'] = [('aim', (s * 0.06, 0.1, -1))]
+        d[f'shin.{sd}'] = [('aim', (s * 0.03, 0.34 if sd == 'R' else 0.2, -1))]
+        d[f'foot.{sd}'] = [('aim', (0, 0.35, -1))]
+    d['spine'] = [('rot', X, -3)]; d['chest'] = [('rot', X, -6)]; d['upper_chest'] = [('rot', X, -5)]
+    d['neck'] = [('rot', X, -24)]; d['head'] = [('rot', X, -32)]
+    return pose(d)
 N = 48
 clips['fly_hover'] = keyframes('fly_hover', [(f, hover_pose(2 * math.pi * f / N)) for f in range(0, N + 1, 6)], N,
                                hip=lambda f: Vector((0, 0, 0.035 * math.sin(2 * math.pi * f / N))))
 # fast flight (the game pitches the whole body forward, so "up" here becomes "forward" in flight)
 def flyfast():
     d = {}
-    if TIGER:  # arms swept back along the body, palms jetting fire; legs straight
-        for sd in 'LR':
-            s = s_(sd)
-            d[f'upper_arm.{sd}'] = [('aim', (s * 0.42, 0.3, -1))]
-            d[f'forearm.{sd}'] = [('aim', (s * 0.35, 0.55, -1))]
-            d[f'hand.{sd}'] = [('aim', (s * 0.25, 1, -0.6))]
-            d[f'thigh.{sd}'] = [('aim', (s * 0.1, 0.06, -1))]
-            d[f'shin.{sd}'] = [('aim', (s * 0.05, 0.12, -1))]
-            d[f'foot.{sd}'] = [('aim', (0, -0.15, -1))]
-        d['chest'] = [('rot', X, -6)]; d['neck'] = [('rot', X, -20)]; d['head'] = [('rot', X, -25)]
+    if TIGER: return endeavor_cruise()
     else:      # Superman: right fist straight ahead (overhead in body space), left arm along the side
         d['upper_arm.R'] = [('aim', (-0.08, -0.12, 1))]; d['forearm.R'] = [('aim', (-0.06, -0.12, 1))]; d['hand.R'] = [('aim', (-0.05, -0.1, 1))]
         d['shoulder.R'] = [('rot', Y, 12)]
@@ -178,7 +218,17 @@ FF = flyfast()
 def ff_noise(f, P):
     w = 2 * math.pi * f / 24
     addrot(P, 'hips', Y, 1.5 * math.sin(w)); addrot(P, 'thigh.L', X, 2 * math.sin(w * 2)); addrot(P, 'thigh.R', X, -2 * math.sin(w * 2))
+    if TIGER:  # thrust corrections: the fists steer the jets, the shoulders roll against them
+        for sd in 'LR': addrot(P, f'upper_arm.{sd}', X, 3 * math.sin(w * 2 + (0 if sd == 'L' else 1.6)))
+        addrot(P, 'upper_chest', Y, 2 * math.sin(w))
 clips['fly_fast'] = keyframes('fly_fast', [(0, FF), (24, FF)], 24, noise=ff_noise)
+if TIGER:  # full-burn boost / sonic-boom flight (blended in by speed)
+    FB = endeavor_boost()
+    def fb_noise(f, P):  # high-frequency buffeting from the jets
+        w = 2 * math.pi * f / 16
+        addrot(P, 'upper_chest', Z, 1.5 * math.sin(w * 2)); addrot(P, 'head', X, 1.2 * math.sin(w * 3))
+        for sd in 'LR': addrot(P, f'forearm.{sd}', X, 2 * math.sin(w * 4 + (0 if sd == 'L' else 2)))
+    clips['fly_boost'] = keyframes('fly_boost', [(0, FB), (16, FB)], 16, noise=fb_noise)
 # tackle: both arms thrust forward/up, leaning in, legs trailing
 def tackle_pose():
     d = {'spine': [('rot', X, 14)], 'chest': [('rot', X, 10)], 'neck': [('rot', X, -18)], 'head': [('rot', X, -22)]}
@@ -244,7 +294,7 @@ capes = [b.name for b in arm.bones if b.name.startswith('cape_')]
 tails = [b.name for b in arm.bones if b.name.startswith('tail')]
 CFG = {  # base lift (deg), flutter amplitude (deg), flutter speed (cycles/sec), gravity compensation
     'idle': (2, 2.5, 0.5, 0.9), 'run': (28, 7, 2.5, 0.6), 'air': (14, 6, 1.5, 0.3), 'punch': (6, 4, 2, 0.8), 'hit': (8, 6, 3, 0.6),
-    'fly_hover': (6, 5, 0.8, 0.7), 'fly_fast': (16, 7, 4, 0.0), 'tackle': (20, 8, 4, 0.2), 'blast': (5, 4, 2, 0.8),
+    'fly_hover': (6, 5, 0.8, 0.7), 'fly_fast': (16, 7, 4, 0.0), 'fly_boost': (24, 9, 6, 0.0), 'tackle': (20, 8, 4, 0.2), 'blast': (5, 4, 2, 0.8),
     'fall': (22, 10, 2.0, 0.0), 'getup': (6, 3, 1, 0.6), 'down': (-10, 0.5, 0.3, 0.0)}
 def chest_pitch(f):
     sc.frame_set(f); bpy.context.view_layer.update()
@@ -255,7 +305,7 @@ for clip, length in clips.items():
     act = bpy.data.actions[clip]; ao.animation_data.action = act
     lift, amp, spd, comp = CFG[clip]
     pitches = [chest_pitch(f) for f in range(length + 1)]
-    loop = clip in ('idle', 'run', 'air', 'fly_hover', 'fly_fast', 'tackle', 'fall', 'down')
+    loop = clip in ('idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down')
     # loops: snap flutter speed to a whole number of cycles over the clip so it loops cleanly
     cyc = max(1, round(spd * length / FPS)) if loop else spd * length / FPS
     for f in range(length + 1):
@@ -265,7 +315,7 @@ for clip, length in clips.items():
             off = {'L': 0.0, 'M': 0.35, 'R': 0.7}[ch]
             a = (lift - comp * (pitches[f] - rest_pitch)) if i == 0 else lift * 0.25
             a += amp * (0.4 + 0.3 * i) * math.sin(ph - i * 1.1 + off)
-            if clip in ('fly_fast', 'tackle', 'fall'): a += amp * 0.4 * math.sin(2 * ph + off * 2 - i)
+            if clip in ('fly_fast', 'fly_boost', 'tackle', 'fall'): a += amp * 0.4 * math.sin(2 * ph + off * 2 - i)
             twist = (amp * 0.15 * math.sin(ph * 0.5 + off + i)) if i > 0 else 0
             pb = ao.pose.bones[n]
             pb.rotation_quaternion = (to_local(n, q_rot(X, a)) @ to_local(n, q_rot(Y, twist))).normalized()

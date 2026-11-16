@@ -151,7 +151,7 @@ function frame() {
   step(dt, raw);
 }
 function step(dt, raw, noRender) {
-  const h = heroes[idx];
+  const h = heroes[idx]; Hero.audioHero = h; // only the hero you control plays its looping flight sounds
   if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
   fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120), h.def.style === 'fire');
   fx.update(dt); traffic.update(dt);

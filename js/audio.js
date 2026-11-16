@@ -84,3 +84,27 @@ export function fireBlastSound(power = 1) {
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.7, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
   o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.9);
 }
+// Temper Tiger flight jets: a continuous flame roar (looped noise through a band-pass "hiss" + a low rumble + a crackle
+// layer). set(level) drives volume and brightness from the jet intensity (0 = silent ... ~2.5 = sonic-boom afterburner).
+export function jetSound() {
+  if (!ctx || ctx.state !== 'running') return null;
+  const t = ctx.currentTime, out = ctx.createGain(); out.gain.value = 0.0001; out.connect(master);
+  const nz = ctx.createBufferSource(); nz.buffer = noiseBuf; nz.loop = true;
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.7; bp.frequency.value = 500;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 160;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
+  const gB = ctx.createGain(), gL = ctx.createGain(), gH = ctx.createGain(); gB.gain.value = 0.55; gL.gain.value = 0.9; gH.gain.value = 0.0;
+  nz.connect(bp); bp.connect(gB); gB.connect(out); nz.connect(lp); lp.connect(gL); gL.connect(out); nz.connect(hp); hp.connect(gH); gH.connect(out);
+  const flick = ctx.createOscillator(), fG = ctx.createGain(); flick.frequency.value = 9; fG.gain.value = 0.12; flick.connect(fG); fG.connect(gB.gain); // flame flutter
+  nz.start(t); flick.start(t);
+  let dead = false;
+  return {
+    set(level) {
+      if (dead) return; const n = ctx.currentTime, k = Math.max(0, Math.min(2.5, level));
+      out.gain.setTargetAtTime(k < 0.01 ? 0.0001 : 0.06 + 0.22 * k, n, 0.08);
+      bp.frequency.setTargetAtTime(420 + 650 * k, n, 0.1); lp.frequency.setTargetAtTime(120 + 90 * k, n, 0.1);
+      gH.gain.setTargetAtTime(Math.max(0, k - 0.9) * 0.12, n, 0.1); fG.gain.setTargetAtTime(0.1 + 0.06 * k, n, 0.1);
+    },
+    stop() { if (dead) return; dead = true; const n = ctx.currentTime; out.gain.setTargetAtTime(0.0001, n, 0.05); nz.stop(n + 0.3); flick.stop(n + 0.3); },
+  };
+}
