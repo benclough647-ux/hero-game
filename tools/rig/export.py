@@ -1,10 +1,11 @@
 # Export a skinned, animated GLB per hero: rig + body/cape LOD0 + body/cape LOD1 (decimated, same skeleton) + mohawk on the head bone.
 import bpy, sys, os
-name = sys.argv[sys.argv.index('--')+1:][0]
-bpy.ops.wm.open_mainfile(filepath=f'/workspace/hero-game-assets/rig/{name}_anim.blend')
+args = sys.argv[sys.argv.index('--')+1:]; name = args[0]; src = args[1] if len(args) > 1 else f'{name}_anim'  # e.g. tiger tiger_anim_face
+bpy.ops.wm.open_mainfile(filepath=f'/workspace/hero-game-assets/rig/{src}.blend')
 ao = bpy.data.objects[f'{name}_rig']; body = bpy.data.objects[f'{name}_body']; cape = bpy.data.objects[f'cape_{name}']; moh = bpy.data.objects.get('Mohawk')
+face = bpy.data.objects.get('TigerFaceDetail')  # rigid face details (ears, cheek ruff, fangs) on the head bone
 for o in list(bpy.data.objects):
-    if o.type in ('LIGHT', 'CAMERA') or (o.type == 'MESH' and o not in (body, cape, moh)): bpy.data.objects.remove(o)
+    if o.type in ('LIGHT', 'CAMERA') or (o.type == 'MESH' and o not in (body, cape, moh, face)): bpy.data.objects.remove(o)
 def sel(objs):
     for x in bpy.context.view_layer.objects: x.select_set(False)
     for o in objs: o.select_set(True)
@@ -21,9 +22,9 @@ def tris(o): return sum(len(p.vertices) - 2 for p in o.data.polygons)
 print('TRIS', {o.name: tris(o) for o in [body, cape] + lods + ([moh] if moh else [])})
 for o in (body, cape, *lods):
     for p in o.data.polygons: p.use_smooth = True
-objs = [ao, body, cape] + lods + ([moh] if moh else [])
+objs = [ao, body, cape] + lods + ([moh] if moh else []) + ([face] if face else [])
 sel(objs)
-out = f'/workspace/hero-game-assets/rig/{name}_skinned_png.glb'
+out = f'/workspace/hero-game-assets/rig/{src.replace("_anim", "_skinned")}_png.glb'
 bpy.ops.export_scene.gltf(filepath=out, export_format='GLB', use_selection=True, export_yup=True, export_apply=False,
     export_image_format='AUTO', export_texcoords=True, export_normals=True, export_tangents=False, export_materials='EXPORT',
     export_skins=True, export_all_influences=False, export_def_bones=False, export_animations=True, export_animation_mode='ACTIONS',
