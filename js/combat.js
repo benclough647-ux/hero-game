@@ -99,6 +99,7 @@ export class Combat {
   // target: hero to track during the move (lock-on / aim assist), or null
   start(h, type, aim, target = null) {
     if (!this.canAct(h) || h.cd[type] > 0) return false;
+    if (type === 'blast' && h.def.style === 'clean' && this.player && h !== this.player) return false; // Centurion's light/eye beam is player-only
     h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
     h.cd[type] = MOVES[type].cd;
     if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.def.tackleSpeed * 1.25;
@@ -650,7 +651,7 @@ export class Combat {
       const r = Math.random();
       if (d < 4.2 && ai.cd.punch <= 0) { this.start(ai, 'punch', dir); B.mode = 'circle'; }
       else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < 0.22) { this.start(ai, 'tackle', dir); }
-      else if (d > 6 && d < 120 && ai.cd.blast <= 0 && r < 0.6) { const jitter = dir.clone().add(V((Math.random() - .5) * 0.06, (Math.random() - .5) * 0.04, (Math.random() - .5) * 0.06)).normalize(); this.start(ai, 'blast', jitter); }
+      else if (d > 6 && d < 120 && ai.cd.blast <= 0 && r < 0.6 && ai.def.style !== 'clean') { /* AI Centurion never fires the beam */ const jitter = dir.clone().add(V((Math.random() - .5) * 0.06, (Math.random() - .5) * 0.04, (Math.random() - .5) * 0.06)).normalize(); this.start(ai, 'blast', jitter); }
       else if (r > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
     }
     if (B.mode === 'rush' && d < 3.5 && ai.cd.punch <= 0 && this.canAct(ai)) { this.start(ai, 'punch', dir); B.mode = 'circle'; }
