@@ -30,6 +30,13 @@ export const COUNTER = { invuln: 0.9,
 // stretched Superman pose and the heavy impact.
 export const DASH = { speed: 230, max: 90, free: 14, stop: 1.8, maxT: 0.6, assist: 75, cone: 0.55, lead: 0.5, softTurn: 11, superMin: 7,
   impact: { kb: 120, kbSpeed: 0.55, up: 0.32, spin: 14, dmgBonus: 10 } };
+// rival-only leg grab: when the player is close (or flies past / right after the rival dodges) it seizes a leg, giant-swings
+// them and flings them into a ragdoll tumble. The player has `window` s to counter (Y): curl up and punch the grabber off.
+export const LEG = { cd: 10, range: 4.2, passRange: 6.5, passSpeed: 25, chance: 0.3, passChance: 0.6, dodgeChance: 0.55,
+  window: 1.5, throwAt: 1.55, dur: 1.75, spinMax: 12, spinUp: 1.1, armR: 0.95, armH: 1.25, leg: 0.95,
+  throwSpeed: 150, throwUp: 0.3, throwDmg: 26,
+  counter: { dur: 0.6, hitAt: 0.3, dmg: 30, speed: 140, up: 0.25, flipDur: 0.5 } };
+const mom = (speed, h) => speed * (0.6 + 0.4 * (h?.def?.mass ?? 1)); // impact momentum (heavier heroes hit the scenery harder)
 
 // screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
 function makeReticle() {
@@ -53,7 +60,7 @@ const MOVES = {
 };
 
 class AIBrain {
-  constructor() { this.t = 0; this.strafe = 1; this.strafeT = 0; this.think = 0; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; }
+  constructor() { this.t = 0; this.strafe = 1; this.strafeT = 0; this.think = 0; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; this.legCd = 4; this.dodgeT = -9; }
 }
 
 const ROAR_VS = `uniform float r0, r1, len, t; varying float vz; varying vec3 vP; varying vec3 vN; varying vec3 vV;
@@ -143,7 +150,7 @@ export class Combat {
   // ---------- helpers ----------
   chest(h, out) { return out.copy(h.pos).setY(h.pos.y + CHEST * h.def.height / 1.83); }
   handPos(h, out) { const f = h.fists?.[0]; if (f) { h.rig.root.updateMatrixWorld(true); return f.getWorldPosition(out); } return this.chest(h, out).addScaledVector(h.aim, 0.8); }
-  canAct(h) { return !h.ragdoll && !h.grabbedBy && !h.ko && !h.action; }
+  canAct(h) { return !h.ragdoll && !h.grabbedBy && !h.legGrabbedBy && !h.ko && !h.action; }
   // aim assist: snap to the opponent if roughly in front, else use the given direction
   aimAt(h, target, fallback, cone = 0.72, range = 220) {
     const to = this.chest(target, t1).sub(this.chest(h, t2)); const d = to.length();
@@ -158,8 +165,8 @@ export class Combat {
     h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
     h.cd[type] = MOVES[type].cd;
     if (type === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
-    if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.def.tackleSpeed * 1.25;
-      h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.def.tackleSpeed * 0.6)); // explosive launch
+    if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.mv.tackleSpeed * 1.25;
+      h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.mv.tackleSpeed * 0.6)); // explosive launch
       if (h.def.style === 'fire') h.fireBurst(h.pos, 70, 20); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 18); this.shakeNear(h.pos, 0.25); }
     if (type === 'punch') this.startDash(h, target);
     return true;
@@ -212,6 +219,7 @@ export class Combat {
   }
   knockback(target, dir, speed, up = 0.25, ragdoll = false, spin = 6) {
     if (target.grabbedBy) this.releaseGrab(target.grabbedBy);
+    if (target.legGrabbing) this.releaseLeg(target);
     target.action = null;
     const v = t1.copy(dir).setY(dir.y + up).normalize().multiplyScalar(speed / target.def.mass);
     target.vel.copy(v);
@@ -219,7 +227,8 @@ export class Combat {
     else { target.knockT = 0.45; if (target.state === 'ground') { target.state = 'air'; target.vel.y = Math.max(target.vel.y, 7); target.pos.y += 0.1; } }
   }
   startRagdoll(h, spin = 6) {
-    h.action = null; h.knockT = 0; h.charge = 0;
+    if (h.legGrabbing && h.action?.type === 'leggrab') this.releaseLeg(h);
+    h.action = null; h.knockT = 0; h.charge = 0; h.endSprint?.(); h.landT = 0;
     if (h.grabbing) this.releaseGrab(h);
     const q = h.ragdoll ? h.ragdoll.q : new THREE.Quaternion().setFromEuler(h.rig.body.rotation);
     // spin mostly about the axis perpendicular to travel (tumble head over heels)
@@ -242,13 +251,13 @@ export class Combat {
   releaseGrab(att) { const v = att.grabbing; if (v) v.grabbedBy = null; att.grabbing = null; if (att.action?.type === 'tackle') att.action.t = att.action.dur; }
   smash(att, victim, normal, hitPoint, speed) {
     const dmg = this.damage(victim, 6 + 0.36 * speed, att, 'building', { speed });
-    this.fx.crash(hitPoint.clone().setY(Math.max(0.5, hitPoint.y - 0.6)), normal, speed, 'wall');
+    const cpw = this.fx.crash(hitPoint.clone().setY(Math.max(0.5, hitPoint.y - 0.6)), normal, mom(speed, victim), 'wall');
     const pw = clamp(speed / 100, 0.4, 3);
     this.fx.impact(hitPoint, normal, pw, false);
     if (pw > 1.3) { this.fx.impact(hitPoint.clone().add(t4.set(0, 2.5, 0)), normal, pw * 0.6, false); this.fx.dustBurst(hitPoint.clone().setY(Math.max(0, hitPoint.y - 2)), 60 + speed * 0.3, 20 + speed * 0.1); }
     this.fx.shockwave(hitPoint.clone().setY(Math.max(0, hitPoint.y - 1)), 0xd8d0c0, Math.min(80, 8 + speed * 0.22));
     this.fx.shockwaveOriented?.(hitPoint.clone().addScaledVector(normal, 0.3), normal, 0xfff0d8, Math.min(60, 6 + speed * 0.15), 0.6, 0.7);
-    this.shakeNear(hitPoint, 0.35 + speed / 110);
+    this.shakeNear(hitPoint, Math.max(0.3, this.fx.crashShake(cpw)));
     this.releaseGrab(att);
     // rebound off the wall carries real momentum now (bounces down the street / into the next block)
     victim.vel.copy(normal).multiplyScalar(8 + speed * 0.2); victim.vel.y = 5 + speed * 0.04;
@@ -283,7 +292,7 @@ export class Combat {
       if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += dt; }
     }
     // grab counter: Y while the rival holds you (player only: the AI never counters)
-    if (inp && inp.switchPressed && this.canCounter(player)) this.counter(player, player.grabbedBy);
+    if (inp && inp.switchPressed && this.canCounter(player)) { if (player.legGrabbedBy) this.legCounter(player, player.legGrabbedBy); else this.counter(player, player.grabbedBy); }
     // player commands (locked on: always aim at / track the enemy)
     if (inp && !player.ko) {
       const fwd = camFwd.clone(), lock = this.lockTarget(enemy);
@@ -309,12 +318,14 @@ export class Combat {
     for (const h of [player, enemy]) {
       if (h.ragdoll) this.ragdollStep(dt, h);
       if (h.grabbedBy) this.carryStep(h.grabbedBy, h);
+      if (h.legGrabbedBy) this.legSwingStep(dt, h.legGrabbedBy, h);
       if (h.slammedBy) this.slamCarry(h.slammedBy, h);
     }
   }
   actionStep(dt, a, b) {
     const act = a.action; if (!act) return;
-    if (act.type === 'counter') { this.counterStep(dt, a, b, act); return; }
+    if (act.type === 'counter') { if (act.style === 'curl') this.legCounterStep(dt, a, act); else this.counterStep(dt, a, b, act); return; }
+    if (act.type === 'leggrab') { if (act.t >= act.dur) { a.action = null; a.legGrabbing = null; } return; }
     const m = MOVES[act.type];
     if (act.type === 'blast' && act.beam) { this.eyeBeamStep(dt, a, b, act); return; }
     if (act.type === 'blast' && !act.done && act.t >= m.fireAt) { act.done = true; this.fireBlast(a, b); }
@@ -334,7 +345,7 @@ export class Combat {
       if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy) {
         // lead the target: aim where it will be when we arrive (capped), so a moving / strafing rival can still be caught
         const tc = this.chest(act.target, t1), ac = this.chest(a, t2), dist = tc.distanceTo(ac);
-        const tti = Math.min(TACKLE.lead, dist / Math.max(a.def.tackleSpeed, a.vel.length(), 1));
+        const tti = Math.min(TACKLE.lead, dist / Math.max(a.mv.tackleSpeed, a.vel.length(), 1));
         const to = tc.addScaledVector(act.target.vel, tti).sub(ac).normalize();
         if (!act.soft || to.dot(a.aim) > TACKLE.assistMinDot) { a.aim.lerp(to, 1 - Math.exp(-dt * (act.soft ? TACKLE.assistTurn : TACKLE.lockTurn))).normalize(); act.homing = true; }
       }
@@ -370,7 +381,7 @@ export class Combat {
     const rel = t1.copy(a.vel).sub(b.vel).length();
     a.grabbing = b; b.grabbedBy = a; b.action = null; b.knockT = 0; b.state = 'air';
     const act = a.action; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
-    act.carrySpeed = Math.max(a.def.tackleSpeed * 1.25, a.vel.length() * 1.15);
+    act.carrySpeed = Math.max(a.mv.tackleSpeed * 1.25, a.vel.length() * 1.15);
     this.damage(b, 4 + 0.1 * rel, a, 'tackle', { speed: rel });
     // the tackle ends in a one-handed choke hold: the attacker brakes hard and hangs the victim at arm's length
     if (b.ko) { this.releaseGrab(a); return; }
@@ -424,7 +435,7 @@ export class Combat {
         // rocket forward carrying the victim: the existing carry / building-smash system takes over
         const dir = isP ? this.camFwd.clone() : this.aiDriveDir(a);
         if (dir.y < -0.3) dir.y = -0.3; dir.normalize();
-        act.mode = 'drive'; act.carryDir = dir; a.aim.copy(dir); act.carrySpeed = a.def.tackleSpeed * 1.25; act.grabT = 0;
+        act.mode = 'drive'; act.carryDir = dir; a.aim.copy(dir); act.carrySpeed = a.mv.tackleSpeed * 1.25; act.grabT = 0;
         a.vel.copy(dir).multiplyScalar(act.carrySpeed * 0.6);
         this.fx.shockwaveOriented?.(this.chest(a, V()).addScaledVector(dir, -0.6), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 14, 0.45, 0.7);
         if (a.def.style === 'fire') a.fireBurst(a.pos, 60, 16); else this.burst(this.chest(a, V()), a, 30, 10);
@@ -480,7 +491,83 @@ export class Combat {
     }
   }
   // ---- grab counter (player only) ----
-  canCounter(h) { const g = h.grabbedBy; return !!g && h === this.player && !h.ko && g.grabbing === h && h.action?.type !== 'counter'; }
+  canCounter(h) {
+    if (h !== this.player || h.ko || h.action?.type === 'counter') return false;
+    const L = h.legGrabbedBy; if (L) return L.legGrabbing === h && L.action?.type === 'leggrab' && L.action.t < LEG.window; // 1.5 s to react
+    const g = h.grabbedBy; return !!g && g.grabbing === h;
+  }
+  // ---- rival leg grab -> giant swing -> fling (AI only); Y counter = curl up + punch ----
+  legGrab(a, v) {
+    if (v.grabbedBy) this.releaseGrab(v.grabbedBy); if (v.grabbing) this.releaseGrab(v);
+    v.endSuper?.(); v.endSprint?.(); v.action = null; v.ragdoll = null; v.knockT = 0; v.flip = null; v.charge = 0; v.landT = 0;
+    a.endSuper?.(); a.endSprint?.(); a.charge = 0;
+    const to = V(v.pos.x - a.pos.x, 0, v.pos.z - a.pos.z); const yaw = to.lengthSq() > 1e-4 ? Math.atan2(to.x, to.z) : a.yaw;
+    a.yaw = yaw; a.aim.set(Math.sin(yaw), 0, Math.cos(yaw)); a.vel.set(0, 0, 0);
+    a.action = { type: 'leggrab', t: 0, dur: LEG.dur, rate: 0, thrown: false, victim: v, y0: a.pos.y };
+    a.legGrabbing = v; v.legGrabbedBy = a; v.state = 'air'; v.legAlpha = -Math.PI + 0.9;
+    this.ai.legCd = LEG.cd; this.lastCombat = this.t;
+    this.stats.hits.push({ t: this.t, kind: 'legGrab', amount: 0, target: v.key, attacker: a.key });
+    if (v === this.player) this.hud?.say(`${a.def.name} grabbed your leg! Y to counter`);
+    whooshSound(a.def.style === 'fire');
+  }
+  releaseLeg(a) { const v = a.legGrabbing; if (v) { v.legGrabbedBy = null; v.legAlpha = undefined; } a.legGrabbing = null; if (a.action?.type === 'leggrab') a.action = null; }
+  legSwingStep(dt, a, v) {
+    const act = a.action;
+    if (!act || act.type !== 'leggrab' || a.legGrabbing !== v || a.ragdoll || a.ko) { // the grabber got hit / KO'd: drop them
+      if (a.legGrabbing === v) a.legGrabbing = null; v.legGrabbedBy = null; v.legAlpha = undefined;
+      if (v.action?.type !== 'counter') { v.state = 'air'; v.rig.body.rotation.set(0, 0, 0); if (!v.ragdoll) this.startRagdoll(v, 6); }
+      return;
+    }
+    const curling = v.action?.type === 'counter';
+    // spin up into a giant swing (slows hard while the victim is curling up to punch)
+    const want = curling ? 0 : LEG.spinMax * THREE.MathUtils.smoothstep(act.t, 0, LEG.spinUp);
+    act.rate += (want - act.rate) * Math.min(1, dt * (curling ? 7 : 5));
+    a.yaw += act.rate * dt; a.aim.set(Math.sin(a.yaw), 0, Math.cos(a.yaw)); a.vel.set(0, 0, 0);
+    if (a.state === 'fly' || a.state === 'air') { a.state = 'fly'; a.pos.y = act.y0; }
+    const k = a.def.height / 1.83, R = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    // victim laid out radially, feet in the grabber's hands: hangs low at first, rises level as the swing speeds up
+    const sf = clamp(act.rate / LEG.spinMax, 0, 1), th = 0.9 + (Math.PI / 2 - 0.9) * sf;
+    const H = a.pos.clone().addScaledVector(R, LEG.armR * k); H.y += LEG.armH * k;
+    const dirB = R.clone().multiplyScalar(Math.sin(th)); dirB.y = -Math.cos(th);
+    const hips = H.addScaledVector(dirB, LEG.leg * v.def.height / 1.83);
+    v.pos.copy(hips); v.pos.y -= v.hipH * v.def.height / 1.83; v.yaw = a.yaw + Math.PI; v.legAlpha = th - Math.PI;
+    v.vel.set(Math.cos(a.yaw), 0, -Math.sin(a.yaw)).multiplyScalar(act.rate * (LEG.armR + LEG.leg));
+    if (!curling && !act.thrown && act.t >= LEG.throwAt) this.legThrow(a, v, act); // no counter in time: fling
+  }
+  legThrow(a, v, act) {
+    act.thrown = true; a.legGrabbing = null; v.legGrabbedBy = null; v.legAlpha = undefined;
+    const T = V(Math.cos(a.yaw), 0, -Math.sin(a.yaw)), R = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    const dir = T.multiplyScalar(0.85).addScaledVector(R, 0.35); dir.y = LEG.throwUp; dir.normalize();
+    v.vel.copy(dir).multiplyScalar(LEG.throwSpeed / v.def.mass); v.rig.body.rotation.set(0, 0, 0);
+    this.damage(v, LEG.throwDmg, a, 'legThrow', { speed: LEG.throwSpeed }); this.startRagdoll(v, 14);
+    const p = this.chest(v, V()); this.burst(p, a, 40, 10); this.fx.shockwaveOriented?.(p, dir, 0xfff0d8, 18, 0.45, 0.6); this.shakeNear(p, 0.5);
+    whooshSound(a.def.style === 'fire');
+  }
+  legCounter(v, a) { // Y in time: curl the legs + torso up toward the grabber, then punch them off
+    v.action = { type: 'counter', style: 'curl', clip: 'leg_counter_curl_punch', t: 0, dur: LEG.counter.dur, done: false, target: a };
+    v.invulnT = Math.max(v.invulnT, LEG.counter.hitAt + 0.6);
+    this.fx.flash(this.chest(v, V()), v.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 30, 0.15);
+    this.hud?.say('COUNTER! Curl up and punch');
+    this.stats.hits.push({ t: this.t, kind: 'counter', amount: 0, target: a.key, attacker: v.key, style: 'curl' });
+    whooshSound(v.def.style === 'fire');
+  }
+  legCounterStep(dt, v, act) {
+    const C = LEG.counter, a = act.target;
+    if (!act.done && act.t >= C.hitAt) {
+      act.done = true;
+      const q0 = v.rig.body.quaternion.clone();
+      if (a.legGrabbing === v) { a.legGrabbing = null; a.action = null; }
+      v.legGrabbedBy = null; v.legAlpha = undefined;
+      const hp = this.chest(a, V()), dir = V(a.pos.x - v.pos.x, 0, a.pos.z - v.pos.z); if (dir.lengthSq() < 1e-4) dir.set(Math.sin(a.yaw), 0, Math.cos(a.yaw)); dir.normalize(); dir.y = C.up; dir.normalize();
+      this.damage(a, C.dmg, v, 'counterPunch', { speed: C.speed });
+      a.vel.copy(dir).multiplyScalar(C.speed / a.def.mass); this.startRagdoll(a, 12);
+      v.state = 'air'; v.vel.copy(dir).multiplyScalar(-10); v.vel.y = 9; v.flip = { t: 0, dur: C.flipDur, q0 };
+      this.fx.flash(hp, v.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 150, 0.35); this.fx.shockwaveOriented?.(hp, dir, 0xfff2c8, 28, 0.5, 0.8);
+      this.burst(hp, v, 110, 24); this.shakeNear(hp, 0.8); if (v === this.player) v.fovKick = (v.fovKick || 0) + 10;
+      whooshSound(false);
+    }
+    if (act.t >= act.dur) v.action = null;
+  }
   counter(v, att) {
     const style = v.def.style === 'fire' ? 'slam' : 'kick', C = COUNTER[style];
     const F = V(Math.sin(att.yaw), 0, Math.cos(att.yaw)); // attacker's forward = from the attacker toward the victim
@@ -826,11 +913,10 @@ export class Combat {
         if (into > 0) {
           h.vel.copy(pre).addScaledVector(n, into * 1.4); // restitution 0.4
           h.vel.multiplyScalar(0.7); rd.av.multiplyScalar(-0.7).add(t4.set(Math.random() - .5, Math.random() - .5, Math.random() - .5).multiplyScalar(6));
-          if (into > 16) {
-            const hp = V(h.pos.x - n.x * r, h.pos.y + 0.9, h.pos.z - n.z * r);
-            this.damage(h, 0.3 * into, null, 'wall', { speed: into });
-            this.fx.impact(hp, n.clone(), clamp(into / 90, 0.3, 1.1), false); this.shakeNear(hp, 0.2 + into / 200);
-            if (into > 25 && this.t - (rd.lastCrashT ?? -9) > 0.3) { rd.lastCrashT = this.t; this.fx.crash(hp, n.clone(), into, 'wall'); }
+          const hp = V(h.pos.x - n.x * r, h.pos.y + 0.9, h.pos.z - n.z * r);
+          if (into > 16) { this.damage(h, 0.3 * into, null, 'wall', { speed: into }); this.fx.impact(hp, n.clone(), clamp(into / 90, 0.3, 1.1), false); }
+          if (into > 6 && this.t - (rd.lastCrashT ?? -9) > 0.3) { // dust / debris / crater all scale with the momentum into the wall
+            rd.lastCrashT = this.t; const cp = this.fx.crash(hp, n.clone(), mom(into, h), 'wall'); if (cp) this.shakeNear(hp, this.fx.crashShake(cp));
           }
         }
       }
@@ -842,8 +928,9 @@ export class Combat {
           // glancing ground hits kick the body into a roll along the slide direction
           const lv = t4.copy(h.vel).applyAxisAngle(t1.set(0, 1, 0), -h.yaw), hs = Math.hypot(lv.x, lv.z);
           if (hs > 3) rd.av.add(t1.set(lv.z, 0, -lv.x).multiplyScalar(0.35 / 0.45)).add(t4.set(Math.random() - .5, Math.random() - .5, Math.random() - .5).multiplyScalar(2));
-          if (imp > 10) this.fx.dustBurst(h.pos, 12 + Math.min(40, imp), 4 + Math.min(14, imp * 0.2));
-          if (imp > 30) { this.damage(h, 0.15 * imp, null, 'ground', { speed: imp }); this.fx.shockwave(h.pos, 0xd8d0c0, Math.min(20, imp * 0.3)); this.fx.crash(h.pos.clone(), V(0, 1, 0), imp, 'ground'); this.shakeNear(h.pos, 0.15 + imp / 250); }
+          const gs = Math.hypot(imp, Math.hypot(h.vel.x, h.vel.z) * 0.3), cp = this.fx.crash(h.pos.clone(), V(0, 1, 0), mom(gs, h), 'ground'); // continuous with momentum
+          if (cp) this.shakeNear(h.pos, this.fx.crashShake(cp));
+          if (imp > 30) { this.damage(h, 0.15 * imp, null, 'ground', { speed: imp }); this.fx.shockwave(h.pos, 0xd8d0c0, Math.min(40, imp * 0.3)); }
         } else { h.vel.y = 0; }
       }
     }
@@ -883,8 +970,9 @@ export class Combat {
   aiInput(dt, ai, player) {
     const B = this.ai; B.t += dt;
     const inp = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
-    if (ai.grabbing) { this.aiCam.yawFacing = ai.yaw; return inp; } // holding someone: the choke logic decides
-    if (ai.ko || ai.ragdoll || ai.grabbedBy || this.aiOff) return inp;
+    B.legCd -= dt;
+    if (ai.grabbing || ai.legGrabbing) { this.aiCam.yawFacing = ai.yaw; return inp; } // holding someone: the choke / swing logic decides
+    if (ai.ko || ai.ragdoll || ai.grabbedBy || ai.legGrabbedBy || this.aiOff) return inp;
     const me = this.chest(ai, V()), tgt = this.chest(player, V());
     const to = tgt.clone().sub(me); const d = to.length(); const dir = to.clone().divideScalar(d || 1);
     const flat = V(to.x, 0, to.z); const fd = flat.length(); if (fd > 1e-3) flat.divideScalar(fd); else flat.set(Math.sin(ai.yaw), 0, Math.cos(ai.yaw));
@@ -908,17 +996,27 @@ export class Combat {
       const g = goal.sub(me); const gl = g.length(); c.forward.copy(gl > 1e-3 ? g.divideScalar(gl) : dir);
       fwd = clamp(gl / 6, 0, 1); inp.boost = gl > 90 ? 1 : 0;
       if (B.flyHold <= 0) { inp.descend = 1; fwd *= 0.5; }
-    } else { c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; }
+    } else { c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; if (!ai.superSprint && fd > 60 && !ai.action && Math.random() < dt * 0.8) inp.superPressed = true; } // the rival super-sprints too
     inp.moveY = fwd; inp.moveX = side;
     // dodge when the player attacks nearby
     const pa = player.action;
     if (pa && pa.t < 0.12 && !B.dodged && d < 35 && ai.cd.dodge <= 0 && Math.random() < 0.45) {
-      B.dodged = true; ai.cd.dodge = 2.5;
+      B.dodged = true; ai.cd.dodge = 2.5; B.dodgeT = B.t;
       const sd = c.right.clone().multiplyScalar(B.strafe * (ai.state === 'fly' ? 45 : 28)); ai.vel.add(sd); if (ai.state === 'ground') { ai.vel.y = 9; ai.state = 'air'; }
       if (ai.def.style === 'fire') ai.fireBurst(ai.pos, 25, 8); else this.fx.dustBurst(ai.pos, 12, 6);
     }
     if (!pa) B.dodged = false;
     // attacks (same moveset, with cooldowns + reaction delay)
+    // leg grab (rival only): close in, the player streaking past, or straight after a dodge
+    const pFree = !player.ko && !player.ragdoll && !player.grabbedBy && !player.legGrabbedBy && !player.grabbing && player.action?.type !== 'counter' && !(player.invulnT > 0);
+    if (B.legCd <= 0 && pFree && this.canAct(ai) && !this.legOff) {
+      const pv = player.vel.length(), passing = d < LEG.passRange && pv > LEG.passSpeed, close = d < LEG.range, afterDodge = B.t - B.dodgeT < 0.8 && d < LEG.passRange;
+      if (close || passing || afterDodge) {
+        const ch = afterDodge ? LEG.dodgeChance : passing ? LEG.passChance : LEG.chance;
+        if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); return inp; }
+        B.legCd = 1.2; // missed the roll: try again a bit later
+      }
+    }
     if (B.think <= 0 && this.canAct(ai) && !player.ragdoll) {
       B.think = 0.35 + Math.random() * 0.5;
       const r = Math.random();
@@ -938,7 +1036,8 @@ export class Combat {
     this.reset(h, p); h.state = 'fly'; h.vel.set(0, 0, 0);
   }
   reset(h, p) {
-    h.endSuper?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0;
+    if (h.legGrabbing) this.releaseLeg(h); if (h.legGrabbedBy) this.releaseLeg(h.legGrabbedBy);
+    h.endSuper?.(); h.endSprint?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0; h.landT = 0; h.legAlpha = undefined;
     if (p) h.pos.copy(p); h.vel.set(0, 0, 0); h.rig.body.rotation.set(0, 0, 0); h.state = h.pos.y > 0.5 ? 'air' : 'ground';
   }
   inCombat(player, enemy) {

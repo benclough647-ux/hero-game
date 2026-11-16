@@ -34,16 +34,17 @@ export class ThirdPersonCamera {
     }
     this.computeAxes();
     const sp = hero.speed, scale = hero.def.height / 1.83;
-    const tgt = hero.pos.clone(); tgt.y += (hero.state === 'fly' ? 0.75 : 1.45) * scale; this.t += dt;
+    const lg = hero.legGrabbedBy; // swung by the leg: frame the grabber (the pivot) from further back so the spin + Y prompt stay readable
+    const tgt = lg ? lg.pos.clone() : hero.pos.clone(); tgt.y += (lg ? 1.3 : hero.state === 'fly' ? 0.75 : 1.45) * scale; this.t += dt;
     if (!this.inited) { this.target.copy(tgt); this.inited = true; }
     // follow tightly (no lag at 300+ m/s) but smooth small jitter
     this.target.lerp(tgt, 1 - Math.exp(-dt * 40)); this.target.addScaledVector(tgt.clone().sub(this.target), 0.85);
-    const wantDist = (2.7 * scale + Math.min(1.4, sp * 0.005)) * (hero.charge ? 1 - hero.charge * 0.2 : 1);
+    const wantDist = lg ? 7.5 * scale : (2.7 * scale + Math.min(1.4, sp * 0.005)) * (hero.charge ? 1 - hero.charge * 0.2 : 1);
     this.dist += (wantDist - this.dist) * Math.min(1, dt * 3);
     if (hero.boomKick) { this.kick += 24 * hero.boomKick; this.shake(1.0); hero.boomKick = 0; } // sonic boom punch
     if (hero.fovKick) { this.kick += hero.fovKick; this.shake(0.15); hero.fovKick = 0; } // punch dash
     this.kick *= Math.exp(-dt * 2.2);
-    const wantFov = 60 + Math.min(14, Math.pow(sp, 0.8) * 0.16) + (hero.superSpeed ? 8 : 0); // speed-based FOV
+    const wantFov = lg ? 62 : 60 + Math.min(14, Math.pow(sp, 0.8) * 0.16) + (hero.superSpeed ? 8 : 0); // speed-based FOV
     this.fov += (wantFov - this.fov) * Math.min(1, dt * 3);
     this.cam.fov = Math.min(110, this.fov + this.kick); this.cam.updateProjectionMatrix();
     const shoulder = this.right.clone().multiplyScalar(-0.35 * scale);

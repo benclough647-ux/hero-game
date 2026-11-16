@@ -197,7 +197,8 @@ export class Effects {
     this.flash(p, 0xffb060, 40 * power + 20, 0.35);
   }
   // crash into a wall/ground at speed: lingering dust plume, debris chunks, persistent crater
-  crash(p, normal, speed, kind = 'wall') { return this.destruction.crash(p, normal, speed, kind); }
+  crash(p, normal, speed, kind = 'wall') { return this.destruction.crash(p, normal, speed, kind); } // -> impact power (0 = nothing)
+  crashShake(pw) { return this.destruction.crashShake(pw); }
   flash(p, color, intensity, dur = 0.25) { this.light.position.copy(p); this.light.color.setHex(color); this.light.intensity = Math.max(this.light.intensity, intensity * 8); this.lightT = dur; this.lightDur = dur; }
   update(dt) {
     this.debris.update(dt, -30); this.spark.update(dt, -12); this.destruction.update(dt);

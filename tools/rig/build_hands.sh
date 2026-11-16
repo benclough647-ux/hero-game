@@ -1,11 +1,12 @@
 set -e
-# Rebuild both skinned GLBs with finger bones (+ Centurion's Omni-Man fly_fast). Run from anywhere.
+# Rebuild both skinned GLBs with finger bones (+ Centurion's Omni-Man fly_fast, batch-5 clips). Run from anywhere.
 # fingers.py always starts from *_anim_face_prefingers.blend, so the order below is safe to re-run.
 B=/home/box/blender_dl/blender-4.2.3-linux-x64/blender
 R=/workspace/hero-game/tools/rig
 cd /workspace/hero-game-assets/rig
 for n in tiger cent; do $B -b --python $R/fingers.py -- $n 2>&1 | grep -E "ADDED|rror"; done
 $B -b --python $R/cent_flight.py -- cent 2>&1 | grep -E "FLY_FAST|rror"
+for n in tiger cent; do $B -b --python $R/batch5.py -- $n 2>&1 | grep -E "BATCH5|rror"; done  # landing / sprint / leg-grab clips
 for n in tiger cent; do
   $B -b --python $R/export.py -- $n ${n}_anim_face 2>&1 | grep -E "EXPORTED|rror"
   # separate vertex layout (headPoints reads skinIndex per component) + no pruning (eye_emit_* / palm_* marker nodes)

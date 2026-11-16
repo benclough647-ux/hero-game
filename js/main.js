@@ -105,7 +105,7 @@ preloadHeroModels((p, url) => {
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
   const save = { pos: b.pos.clone(), vel: b.vel.clone(), yaw: b.yaw, state: b.state, hp: b.hp, ko: b.ko, rag: b.ragdoll, koT: b.koT };
-  for (const h of [a, b]) { if (h.grabbing) combat.releaseGrab(h); h.action = null; h.endSuper(); h.flip = null; }
+  for (const h of [a, b]) { if (h.grabbing) combat.releaseGrab(h); if (h.legGrabbing) combat.releaseLeg(h); h.action = null; h.endSuper(); h.endSprint(); h.landT = 0; h.flip = null; }
   b.pos.copy(a.pos); b.vel.copy(a.vel); b.yaw = a.yaw; b.state = a.state; b.charge = 0; b.flyBlend = a.flyBlend; b.hp = a.hp; b.ko = a.ko; b.koT = a.koT;
   b.ragdoll = a.ragdoll; if (!b.ragdoll) b.rig.body.rotation.set(0, 0, 0);
   a.pos.copy(save.pos); a.vel.copy(save.vel); a.yaw = save.yaw; a.state = save.state; a.charge = 0; a.hp = save.hp; a.ko = save.ko; a.koT = save.koT;
@@ -116,21 +116,21 @@ function switchHero() {
 const lockPt = new THREE.Vector3();
 function combatFrame(dt, inp) {
   const P = heroes[idx], E = heroes[idx ^ 1];
-  const pFree = !P.ragdoll && !P.grabbedBy && !P.slammedBy, eFree = !E.ragdoll && !E.grabbedBy && !E.slammedBy;
+  const pFree = !P.ragdoll && !P.grabbedBy && !P.slammedBy && !P.legGrabbedBy, eFree = !E.ragdoll && !E.grabbedBy && !E.slammedBy && !E.legGrabbedBy;
   if (pFree) P.update(dt, P.ko ? NOINP : inp, cam, city);
   const aiInp = combat.aiInput(dt, E, P);
   if (eFree) E.update(dt, aiInp, combat.aiCam, city);
   combat.update(dt, P, E, P.ko ? null : inp, cam.forward);
   combat.updateLock(dt, P, E, inp);
   cam.lockTarget = combat.lockOn && !E.ko ? combat.chest(E, lockPt) : null;
-  if (P.ragdoll || P.grabbedBy || P.slammedBy) P.animate(dt, 0);
-  if (E.ragdoll || E.grabbedBy || E.slammedBy) E.animate(dt, 0);
+  if (P.ragdoll || P.grabbedBy || P.slammedBy || P.legGrabbedBy) P.animate(dt, 0);
+  if (E.ragdoll || E.grabbedBy || E.slammedBy || E.legGrabbedBy) E.animate(dt, 0);
   // KO -> respawn
   if (P.ko && (P.koT += dt) > 3.2) { combat.reset(P, P.pos.clone().setY(city.heightAt(P.pos.x, P.pos.z))); hud.say('Back on your feet'); }
   if (E.ko && (E.koT += dt) > 4) combat.respawnNear(E, P);
   hud.bars(P, E, combat.inCombat(P, E), dt);
   hud.grab(combat.grabState(P, E), input.state.hasPad, P.def.style === 'fire');
-  hud.counter(combat.canCounter(P) && E.grabbing === P, E, camera, dt); // Y prompt over the grabber's head, only while they hold you
+  hud.counter(combat.canCounter(P) && (E.grabbing === P || E.legGrabbing === P), E, camera, dt); // Y prompt over the grabber's head, only while they hold you (choke or leg grab: 1.5 s)
 }
 const clock = new THREE.Clock();
 let paused = false;
@@ -146,7 +146,7 @@ function frame() {
   const h = heroes[idx];
   if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); heroes[idx ^ 1].animate(dt, 0); }
   else {
-    if (inp.switchPressed && !heroes[idx].grabbedBy && heroes[idx].action?.type !== 'counter') switchHero(); // Y while grabbed = counter instead
+    if (inp.switchPressed && !heroes[idx].grabbedBy && !heroes[idx].legGrabbedBy && heroes[idx].action?.type !== 'counter') switchHero(); // Y while grabbed = counter instead
     combatFrame(dt, inp); cam.update(dt, inp, heroes[idx], city);
   }
   step(dt, raw);
@@ -154,7 +154,7 @@ function frame() {
 function step(dt, raw, noRender) {
   const h = heroes[idx]; Hero.audioHero = h; // only the hero you control plays its looping flight sounds
   if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
-  fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120), h.def.style === 'fire');
+  fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120) || (h.superSprint && h.state === 'ground' && Math.hypot(h.vel.x, h.vel.z) > 30), h.def.style === 'fire');
   fx.update(dt); traffic.update(dt);
   world.update(dt, camera, h.pos);
   city.update(camera.position, view);

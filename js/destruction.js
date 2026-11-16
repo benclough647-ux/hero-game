@@ -82,6 +82,9 @@ function craterTexture(ground) {
 }
 
 const RUBBLE_PER = 14;
+// momentum -> impact scaling (speed in m/s; pw = speed / 100, capped). Thresholds: dust from a light bump, debris from a
+// real hit, a crater from a hard one; caps bound the particle / debris / crater budgets.
+export const CRASH = { dustMin: 6, debrisMin: 16, craterMin: 28, pwMax: 6, dustK: 90, dustCap: 380, debrisK: 22, debrisCap: 70, craterCap: 14, lifeCap: 14 };
 export class Destruction {
   constructor(scene) {
     this.scene = scene; this.t = 0; this.cityRef = null; this.lowQ = false;
@@ -113,53 +116,66 @@ export class Destruction {
   get crateredCount() { return this.craters.filter(c => c.used).length; }
 
   // main entry: a hero slammed into a wall (normal = face normal) or the ground (normal = up) at `speed` m/s
+  // Every impact (ragdoll into a wall / the ground, slams, landings, lunges) comes through here. All of it scales
+  // CONTINUOUSLY with the impact momentum (speed, heavier heroes pre-scaled by the caller): a bump puffs a little dust,
+  // a sonic-speed hit throws a huge, long-lived plume, a shower of debris and a deep crater. Caps keep it affordable.
   crash(p, normal, speed, kind = 'wall') {
-    if (speed < 22) return false;
-    const city = this.cityRef; if (kind === 'ground' && city?.isWater?.(p.x, p.z) && p.y < 1) return false;
-    const pw = THREE.MathUtils.clamp((speed - 15) / 110, 0.15, 2.6), m = this.mult;
-    this.dustPlume(p, normal, pw, kind, m);
-    this.debris(p, normal, pw, Math.round((8 + 26 * Math.min(pw, 1.6)) * m));
-    if (speed > 34) this.crater(p, normal, pw, kind);
-    return true;
+    if (!(speed >= CRASH.dustMin)) return 0;
+    const city = this.cityRef; if (kind === 'ground' && city?.isWater?.(p.x, p.z) && p.y < 1) return 0;
+    const pw = Math.min(CRASH.pwMax, speed / 100), g = Math.pow(pw, 0.75), m = this.mult, ground = kind === 'ground';
+    const N = Math.round(Math.min(CRASH.dustCap, 3 + CRASH.dustK * g) * m);
+    const sizeK = 0.25 + 0.55 * g, lifeK = 0.35 + 0.45 * g, velK = 0.3 + 0.55 * g;
+    this.dustPlume(p, normal, g, kind, N, sizeK, lifeK, velK);
+    const deb = speed < CRASH.debrisMin ? 0 : Math.round(Math.min(CRASH.debrisCap, 1 + CRASH.debrisK * g) * m);
+    if (deb) this.debris(p, normal, g, deb);
+    let r = 0, depth = 0;
+    if (speed >= CRASH.craterMin) {
+      r = Math.min(ground ? CRASH.craterCap : CRASH.craterCap * 0.8, ground ? 0.35 + 2.9 * g : 0.3 + 2.4 * g);
+      depth = (ground ? 0.9 : 0.55) * THREE.MathUtils.clamp(0.55 + 0.3 * g, 0.6, 1.7);
+      this.crater(p, normal, r, kind, depth);
+    }
+    this.lastCrash = { speed, pw, kind, dust: N, dustSize: sizeK, dustLife: lifeK * 4.75, debris: deb, craterR: r, craterDepth: depth * r };
+    this.crashCount = (this.crashCount || 0) + 1;
+    return Math.max(pw, 1e-3);
   }
-  dustPlume(p, n, pw, kind, m) {
-    const N = Math.round((36 + 80 * Math.min(pw, 1.8)) * m), ground = kind === 'ground';
+  crashShake(pw) { return pw ? Math.min(1.3, 0.05 + 0.32 * Math.pow(pw, 0.8)) : 0; }
+  dustPlume(p, n, g, kind, N, sizeK, lifeK, velK) {
+    const ground = kind === 'ground', spread = 0.3 + 1.2 * g;
     for (let i = 0; i < N; i++) {
-      const a = Math.random() * Math.PI * 2, s = (4 + Math.random() * 14) * (0.6 + 0.5 * pw);
-      if (ground) V.set(Math.cos(a) * s, 1 + Math.random() * 6 * pw, Math.sin(a) * s); // low rolling ring that rises
-      else { V.copy(n).multiplyScalar(3 + Math.random() * 10 * (0.6 + pw)); V.x += Math.cos(a) * s * 0.6; V.z += Math.sin(a) * s * 0.6; V.y += (Math.random() - 0.3) * s * 0.6; }
-      P.copy(p).addScaledVector(n, 0.5 + Math.random()); P.x += (Math.random() - 0.5) * 2 * pw; P.z += (Math.random() - 0.5) * 2 * pw; P.y += Math.random() * pw;
-      const life = 3 + Math.random() * 3.5 + pw;
-      this.plume.emit(P, V, life, 1 + Math.random() * 1.5, (3 + Math.random() * 6) * (0.7 + 0.45 * pw), 0.6 + Math.random() * 0.6);
+      const a = Math.random() * Math.PI * 2, s = (4 + Math.random() * 14) * velK;
+      if (ground) V.set(Math.cos(a) * s, (0.5 + Math.random() * 6) * velK, Math.sin(a) * s); // low rolling ring that rises
+      else { V.copy(n).multiplyScalar((3 + Math.random() * 10) * velK); V.x += Math.cos(a) * s * 0.6; V.z += Math.sin(a) * s * 0.6; V.y += (Math.random() - 0.3) * s * 0.6; }
+      P.copy(p).addScaledVector(n, 0.3 + Math.random() * spread * 0.6); P.x += (Math.random() - 0.5) * 2 * spread; P.z += (Math.random() - 0.5) * 2 * spread; P.y += Math.random() * spread * 0.6;
+      const life = Math.min(CRASH.lifeCap, (3 + Math.random() * 3.5) * lifeK);
+      this.plume.emit(P, V, life, 1 + Math.random() * 1.5, (3 + Math.random() * 6) * sizeK, 0.6 + Math.random() * 0.6);
     }
     // a slow column drifting off the wall / out of the crater
-    for (let i = 0; i < N * 0.3; i++) { P.copy(p).addScaledVector(n, 1.5); V.copy(n).multiplyScalar(1 + Math.random() * 3).add(S.set((Math.random() - 0.5) * 2, 2 + Math.random() * 4, (Math.random() - 0.5) * 2));
-      this.plume.emit(P, V, 5 + Math.random() * 3, 2, (5 + Math.random() * 6) * (0.7 + 0.4 * pw), 0.7 + Math.random() * 0.5); }
+    for (let i = 0; i < N * 0.3; i++) { P.copy(p).addScaledVector(n, 0.5 + spread * 0.5); V.copy(n).multiplyScalar((1 + Math.random() * 3) * velK).add(S.set((Math.random() - 0.5) * 2, (2 + Math.random() * 4) * velK, (Math.random() - 0.5) * 2));
+      this.plume.emit(P, V, Math.min(CRASH.lifeCap, (5 + Math.random() * 3) * lifeK), 2, (5 + Math.random() * 6) * sizeK, 0.7 + Math.random() * 0.5); }
   }
   debris(p, n, pw, count) {
     for (let i = 0; i < count; i++) {
       const d = this.d[this.debI]; this.debI = (this.debI + 1) % this.debMax;
-      d.life = 4 + Math.random() * 3; d.rest = false; d.s = (0.25 + Math.random() * 0.7) * (0.7 + 0.4 * Math.min(pw, 1.5));
+      d.life = 4 + Math.random() * 3; d.rest = false; d.s = (0.25 + Math.random() * 0.7) * (0.45 + 0.4 * Math.min(pw, 2.2));
       d.p.copy(p).addScaledVector(n, 0.6).add(V.set((Math.random() - 0.5) * 1.5, Math.random() * 1.2, (Math.random() - 0.5) * 1.5));
-      d.v.copy(n).multiplyScalar(6 + Math.random() * 20 * (0.5 + pw)).add(V.set((Math.random() - 0.5) * 18, 4 + Math.random() * 14, (Math.random() - 0.5) * 18).multiplyScalar(0.6 + 0.4 * pw));
+      d.v.copy(n).multiplyScalar(6 + Math.random() * 20 * (0.3 + pw)).add(V.set((Math.random() - 0.5) * 18, 4 + Math.random() * 14, (Math.random() - 0.5) * 18).multiplyScalar(0.4 + 0.4 * pw));
       d.q.setFromEuler(E.set(Math.random() * 6, Math.random() * 6, Math.random() * 6)); d.w.set((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16);
     }
   }
-  crater(p, n, pw, kind) {
-    const ground = kind === 'ground', r = (ground ? 1.6 + 2.2 * pw : 1.3 + 1.9 * pw);
+  crater(p, n, r, kind, depth = 0.9) {
     // a fresh hit on top of a recent crater just grows it a little
-    for (const c of this.craters) if (c.used && c.kind === kind && c.p.distanceTo(p) < c.r * 0.6) { if (r > c.r) this.placeCrater(c, c.p, c.n, Math.min(r, c.r * 1.25), kind); c.t = this.t; return; }
+    for (const c of this.craters) if (c.used && c.kind === kind && c.p.distanceTo(p) < c.r * 0.6) { if (r > c.r) this.placeCrater(c, c.p, c.n, Math.min(r, c.r * 1.25), kind, Math.max(depth, c.depth || 0)); c.t = this.t; return; }
     let c = this.craters.find(k => !k.used); const used = this.craters.filter(k => k.used).length;
     if (!c || used >= (this.lowQ ? 10 : this.cap)) { c = this.craters.filter(k => k.used).sort((a, b) => a.t - b.t)[0]; } // recycle the oldest
-    this.placeCrater(c, p, n, r, kind); c.t = this.t;
+    this.placeCrater(c, p, n, r, kind, depth); c.t = this.t;
   }
-  placeCrater(c, p, n, r, kind) {
+  placeCrater(c, p, n, r, kind, depth = 0.9) {
     const ground = kind === 'ground', idx = this.craters.indexOf(c);
-    c.used = true; c.kind = kind; c.r = r; c.p.copy(p); c.n = n.clone();
+    c.used = true; c.kind = kind; c.r = r; c.depth = depth; c.p.copy(p); c.n = n.clone();
     const d = c.decal; d.visible = true; d.material.map = ground ? this.groundTex : this.wallTex; d.material.needsUpdate = true;
     d.position.copy(p).addScaledVector(n, 0.04); d.quaternion.setFromUnitVectors(Z, n); d.rotateZ(Math.random() * 6.28); d.scale.set(r * 2.3, r * 2.3, 1);
     c.rim.visible = true; c.rim.position.copy(p).addScaledVector(n, ground ? 0.0 : 0.02); c.rim.quaternion.setFromUnitVectors(UP, n);
-    c.rim.scale.set(r, r * (ground ? 0.9 : 0.55), r);
+    c.rim.scale.set(r, r * depth, r); // bowl depth grows with the momentum
     // rubble chunks heaped around the rim (and a few in the bowl)
     const t1 = new THREE.Vector3().crossVectors(n, Math.abs(n.y) > 0.9 ? Z : UP).normalize(), t2 = new THREE.Vector3().crossVectors(n, t1);
     for (let i = 0; i < RUBBLE_PER; i++) {

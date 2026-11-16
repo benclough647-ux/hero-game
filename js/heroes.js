@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { sonicBoomSound, jetSound, fireBoomSound } from './audio.js';
+import { sonicBoomSound, jetSound, fireBoomSound, whooshSound } from './audio.js';
 // Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
 // and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -345,9 +345,18 @@ export async function preloadHeroModels(onProgress) {
   return result;
 }
 
-const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down']);
+const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down', 'sprint_super', 'leg_grabbed_hang']);
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
-const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counter_kick', 'counter_slam']);
+const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counter_kick', 'counter_slam', 'land_boom', 'leg_grab_spin', 'leg_counter_curl_punch']);
+// rival AI moves a little faster than the player on the same hero (run / sprint / flight / boost / tackle)
+export const AI_SPEED = 1.09;
+// grounded super sprint (LS click on the ground): multiple of run speed
+export const SPRINT = { mult: 3.5, accel: 3.2, stopT: 0.22, boomR: 14 };
+// superhero 'boom' landing: stop dead, then a short recovery before control returns
+export const LANDING = { min: 0.3, max: 0.5, full: 70, softMax: 16 };
+// impact speed -> 'momentum' speed fed to the crater/dust scaling (heavier heroes hit harder)
+export const momentumSpeed = (speed, mass = 1) => speed * (0.6 + 0.4 * mass);
+const AI_KEYS = ['run', 'sprint', 'fly', 'flyBoost', 'tackleSpeed'];
 export const MAX_HP = 1000; // each hero's health (bars and HP numbers show /1000)
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
 const _cq = new THREE.Quaternion(), _cp = new THREE.Quaternion(), _cd = new THREE.Quaternion(), _cv = new THREE.Vector3(), _cv2 = new THREE.Vector3(), _cf = new THREE.Vector3(), _cr = new THREE.Vector3(), _cu = new THREE.Vector3(), _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _c3 = new THREE.Vector3(), _c4 = new THREE.Vector3();
@@ -580,6 +589,38 @@ export class Hero {
   }
   setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (!v && this.jets) for (const j of [...this.jets, ...this.jetCores]) j.visible = false; }
   // LS while flying: sonic boom, then super speed until you stop flying, let go of the stick, slow down, or press LS again
+  get mv() { // movement stats: the rival AI gets AI_SPEED x the player's numbers
+    if (this.isPlayer !== false) return this.def;
+    if (!this._aiDef || this._aiDef.base !== this.def) { const m = { ...this.def, base: this.def }; for (const k of AI_KEYS) m[k] = this.def[k] * AI_SPEED; this._aiDef = m; }
+    return this._aiDef;
+  }
+  startSprint() { // grounded super sprint: a small boom on activation
+    this.superSprint = true; this.sprintIdle = 0; this.sprintTrailT = 0; this.sprintFoot = 0;
+    const fire = this.def.style === 'fire', f = V(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    this.vel.x += f.x * this.mv.run * 1.2; this.vel.z += f.z * this.mv.run * 1.2;
+    this.fx.shockwave(this.pos, fire ? 0xff7020 : 0xe8e2d0, SPRINT.boomR); this.fx.dustBurst(this.pos, 45, 16);
+    if (fire) this.fireBurst(this.pos, 40, 10);
+    this.boomKick = 0.6; Hero.onCrash?.(this.pos, 0.22); whooshSound(fire);
+  }
+  endSprint() { this.superSprint = false; }
+  sprintTrail(dt, hs) { // dust trail (+ Tiger's burning footprints)
+    if (hs < 12) return;
+    this.sprintTrailT -= dt;
+    if (this.sprintTrailT <= 0) {
+      this.sprintTrailT = 0.035; const b = V(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+      this.fx.dustBurst(this.pos.clone().addScaledVector(b, 0.8), 3, 2.5 + hs * 0.05);
+    }
+    if (this.def.style === 'fire') {
+      this.sprintFoot += dt * hs / 2.6;
+      if (this.sprintFoot >= 1) {
+        this.sprintFoot -= 1; this.footSide = -(this.footSide || 1);
+        const r = V(Math.cos(this.yaw), 0, -Math.sin(this.yaw)), fp = this.pos.clone().addScaledVector(r, 0.22 * this.footSide); fp.y += 0.05;
+        const v = V(), c0 = new THREE.Color(5, 3, 0.9), c1 = new THREE.Color(3, 0.35, 0.04);
+        for (let i = 0; i < 7; i++) { v.set((Math.random() - 0.5) * 1.2, 0.6 + Math.random() * 1.6, (Math.random() - 0.5) * 1.2); this.fx.fire.emit(fp, v, 0.7 + Math.random() * 0.6, c0, c1); }
+        this.footprints = (this.footprints || 0) + 1;
+      }
+    }
+  }
   sonicBoom(cam) {
     const fire = this.def.style === 'fire';
     const dir = this.vel.lengthSq() > 25 ? this.vel.clone().normalize() : (cam?.forward ? cam.forward.clone() : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)));
@@ -729,13 +770,20 @@ export class Hero {
       if (this.state === 'ground') {
         const run = Math.min(1, hs / 6); tgt.idle = 1 - run; tgt.run = run;
         if (has('run')) acts.run.setEffectiveTimeScale(THREE.MathUtils.clamp(hs / (this.def.style === 'fire' ? 13 : 15), 0.7, 1.7));
+        if (this.superSprint && has('sprint_super')) { // super sprint: forward lean + pumping arms, cadence follows speed
+          const sr = THREE.MathUtils.clamp((hs - 8) / 18, 0, 1); tgt.idle *= 1 - sr; tgt.run *= 1 - sr; tgt.sprint_super = sr;
+          acts.sprint_super.setEffectiveTimeScale(THREE.MathUtils.clamp(hs / 34, 0.8, 1.9));
+        }
         if (this.charge > 0 && has('crouch')) { const c = Math.min(1, this.charge * 2); tgt.idle *= 1 - c; tgt.run *= 1 - c; tgt.crouch = c; drive('crouch', 0.42); }
       } else if (this.state === 'air') tgt.air = 1;
       else if (act && act.beam) { tgt.fly_hover = 1; } // beam in flight: the body stands upright, so drop the cruise pose (Centurion's raised fist) and brace in the hover stance
       else if (has('fly_boost')) { const bz = this.boostBlend; tgt.fly_hover = 1 - fb; tgt.fly_fast = fb * (1 - bz); tgt.fly_boost = fb * bz; } // Tiger: hover -> cruise -> full burn
       else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
       const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
-      if (act && act.type === 'counter' && has(act.clip)) { over = act.clip; overW = 1; drive(act.clip, act.t); } // grab counter (kick / slam), flip included
+      if (act && act.type === 'counter' && has(act.clip)) { over = act.clip; overW = 1; drive(act.clip, act.t); } // grab counter (kick / slam / leg-grab curl punch), flip included
+      else if (act && act.type === 'leggrab' && has('leg_grab_spin')) { over = 'leg_grab_spin'; overW = 1; drive('leg_grab_spin', act.t); } // rival: seize the leg, giant swing, fling
+      else if (this.legGrabbedBy && has('leg_grabbed_hang')) { over = 'leg_grabbed_hang'; overW = 1; }
+      else if (this.state === 'ground' && this.landT > 0 && has('land_boom')) { over = 'land_boom'; overW = 1; drive('land_boom', (1 - this.landT / (this.landDur || 0.4)) * acts.land_boom.getClip().duration); } // superhero landing
       else if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
       else if (this.grabbedBy && has('fall')) { over = 'fall'; overW = 0.35; }
       else if (hold) { over = null; }
@@ -989,21 +1037,27 @@ export class Hero {
   get modeLabel() { return { ground: 'On foot', air: 'Airborne', fly: this.def.style === 'fire' ? 'Fire flight' : 'Flying' }[this.state] + (this.superSpeed ? ' – SUPER SPEED' : '') + (this.charge > 0 ? ' – charging leap' : ''); }
 
   update(dt, inp, cam, city) {
-    const d = this.def, fire = d.style === 'fire'; this.t += dt;
+    const d = this.mv, fire = d.style === 'fire'; this.t += dt;
     const stun = this.knockT > 0; if (stun) { this.knockT -= dt; inp = NO_INP; }
     else if (this.grabbing || this.action?.type === 'counter') inp = NO_INP; // counter: scripted; choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
     const fwd = cam.flatForward, right = cam.right;
     const wish = V().addScaledVector(fwd, inp.moveY).addScaledVector(right, inp.moveX);
     const prevYaw = this.yaw;
 
-    if (this.state === 'ground') {
-      // after a dive landing, carry momentum straight into a sprint
-      if (this.sprintT > 0) { this.sprintT -= dt; if (wish.lengthSq() < 0.01) wish.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)); }
-      const tgt = wish.clone().multiplyScalar(inp.boost > 0.3 || this.sprintT > 0 ? d.sprint : d.run);
+    if (this.landT > 0 && this.state !== 'ground') this.landT = 0; // took off again (forced flight, knockback): recovery over
+    if (this.state === 'ground' && this.landT > 0) { // boom landing: planted, no steps or slide until the recovery ends
+      this.landT -= dt; this.vel.set(0, 0, 0); this.charge = 0;
+    } else if (this.state === 'ground') {
+      if (this.superSprint) { // stops on releasing the stick, jumping or attacking
+        if (wish.lengthSq() < 0.04) this.sprintIdle += dt; else this.sprintIdle = 0;
+        if (this.sprintIdle > SPRINT.stopT || this.action || inp.jumpPressed || this.charge > 0) this.endSprint();
+      }
+      const tgt = wish.clone().multiplyScalar(this.superSprint ? d.run * SPRINT.mult : inp.boost > 0.3 ? d.sprint : d.run);
       if (this.charge > 0) tgt.multiplyScalar(0.15);
-      const k = Math.min(1, dt * (this.sprintT > 0 ? 3 : 10));
+      const k = Math.min(1, dt * (this.superSprint ? SPRINT.accel : 10));
       this.vel.x += (tgt.x - this.vel.x) * k; this.vel.z += (tgt.z - this.vel.z) * k;
       this.vel.y = 0;
+      if (this.superSprint) this.sprintTrail(dt, Math.hypot(this.vel.x, this.vel.z));
       if (fire) { // Temper Tiger: hold to charge a huge leap, release to launch
         if (inp.jump) this.charge = Math.min(1, this.charge + dt / 1.1);
         if (inp.jumpReleased && this.charge > 0) this.leap();
@@ -1021,7 +1075,11 @@ export class Hero {
       else this.flyUpdate(dt, inp, cam);
       if (inp.cancelPressed && this.state === 'fly') this.state = 'air';
     }
-    if (inp.superPressed && !stun) { if (this.superSpeed) this.endSuper(); else if (this.state === 'fly') this.sonicBoom(cam); }
+    if (inp.superPressed && !stun) {
+      if (this.superSpeed) this.endSuper(); else if (this.state === 'fly') this.sonicBoom(cam);
+      else if (this.state === 'ground' && !(this.landT > 0)) { if (this.superSprint) this.endSprint(); else if (!this.action) this.startSprint(); }
+    }
+    if (this.superSprint && this.state !== 'ground') this.endSprint();
     if (this.superSpeed) {
       this.superT += dt;
       if (this.state !== 'fly' || this.grabbedBy || (this.superT > 0.8 && this.vel.length() < d.flyBoost * 0.5)) this.endSuper();
@@ -1059,7 +1117,7 @@ export class Hero {
         if (into > 60 && this.t - (this.lastCrashT ?? -9) > 0.35) {
           this.lastCrashT = this.t; const r = 0.35 * (fire ? 1.3 : 1);
           const hp = V(this.pos.x - nx * r, this.pos.y + 1.0, this.pos.z - nz * r), n = V(nx, 0, nz);
-          this.fx.crash(hp, n, into, 'wall'); this.fx.impact(hp, n, Math.min(2, into / 100), false); Hero.onCrash?.(hp, 0.25 + into / 220);
+          const pw = this.fx.crash(hp, n, momentumSpeed(into, d.mass), 'wall'); this.fx.impact(hp, n, Math.min(2, into / 100), false); Hero.onCrash?.(hp, this.fx.crashShake(pw));
         }
       }
       if (this.pos.y <= floor) {
@@ -1104,20 +1162,29 @@ export class Hero {
     if (nearGround) { const g = this.pos.clone(); g.y -= Math.min(this.pos.y, 3); this.fx.shockwave(g, 0xe8e2d0, 30); this.fx.dustBurst(g, 120, 35); }
   }
   startFly() { this.state = 'fly'; this.fromJump = false; if (this.def.style === 'fire') this.fireBurst(this.pos, 40, 10); }
-  land() {
-    const impact = -this.vel.y, hs = Math.hypot(this.vel.x, this.vel.z); this.state = 'ground';
+  land() { // superhero 'boom' landing: plant on the spot (no slide / run-out steps), impact scaled by momentum
+    const impact = Math.max(0, -this.vel.y), hs = Math.hypot(this.vel.x, this.vel.z), wasFly = this.state === 'fly'; this.state = 'ground';
+    const sp = Math.hypot(impact, hs * 0.5), mom = momentumSpeed(sp, this.def.mass);
     this.landSquash = Math.max(0.72, 1 - Math.min(0.28, impact / 90)); this.leapStretch = 1;
-    if (hs > 6) { const c = Math.min(1, this.def.sprint * 1.6 / hs); this.vel.x *= c; this.vel.z *= c; this.sprintT = 1.4; } // dive -> sprint
-    if (impact > 6 || hs > 20) this.fx.dustBurst(this.pos, 25 + Math.min(80, impact + hs * 0.3), 5 + Math.min(25, impact * 0.3 + hs * 0.08));
-    if (impact > 35) this.fx.shockwave(this.pos, this.def.style === 'fire' ? 0xff7020 : 0xe8e2d0, Math.min(40, impact * 0.5));
-    if (impact > 55) { this.fx.crash(this.pos.clone(), V(0, 1, 0), impact, 'ground'); Hero.onCrash?.(this.pos, 0.2 + impact / 250); } // superhero landing crater
+    this.sprintT = 0; this.charge = 0;
+    const boom = wasFly || impact > LANDING.softMax; // from flight or a real fall: boom landing. A hop / stepping off a ledge: soft landing, keep walking
+    if (boom) {
+      this.vel.set(0, 0, 0); this.endSprint();
+      const f = THREE.MathUtils.clamp(sp / LANDING.full, 0, 1);
+      this.landDur = this.landT = LANDING.min + (LANDING.max - LANDING.min) * f;
+    } else { this.vel.y = 0; const c = Math.min(1, (this.superSprint ? this.mv.run * SPRINT.mult : this.mv.sprint) / Math.max(hs, 1e-3)); this.vel.x *= c; this.vel.z *= c; }
+    this.lastLanding = { impact, hs, mom, boom, dur: boom ? this.landDur : 0, t: this.t };
+    const g = this.pos.clone();
+    if (mom > 14) this.fx.shockwave(g, this.def.style === 'fire' ? 0xff7020 : 0xe8e2d0, Math.min(46, 4 + mom * 0.32)); // impact ring
+    const pw = this.fx.crash(g, V(0, 1, 0), mom, 'ground'); // dust + debris + crater, all scaled continuously
+    if (pw) Hero.onCrash?.(g, this.fx.crashShake(pw));
   }
   fireBurst(p, n, s) {
     const v = V(), c0 = new THREE.Color(5, 3, 0.9), c1 = new THREE.Color(3, 0.35, 0.04);
     for (let i = 0; i < n; i++) { v.set((Math.random() - 0.5) * s * 2, Math.random() * s * 0.5, (Math.random() - 0.5) * s * 2); this.fx.fire.emit(p, v, 0.4 + Math.random() * 0.5, c0, c1); }
   }
   flyUpdate(dt, inp, cam) {
-    const d = this.def;
+    const d = this.mv;
     const dir = V().addScaledVector(cam.forward, inp.moveY).addScaledVector(cam.right, inp.moveX);
     dir.y += (inp.jump ? 1 : 0) - inp.descend;
     const len = Math.min(1, dir.length()); if (len > 0) dir.normalize();
@@ -1166,6 +1233,7 @@ export class Hero {
       r.body.rotation.z = this.bank * (1 - this.upright);
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       if (this.slammedBy && this.slamPitch) { r.body.rotation.x = this.slamPitch; r.body.rotation.z = 0; } // swung over Tiger's head by the wrists (combat.slamCarry)
+      if (this.legGrabbedBy && this.legAlpha !== undefined) { r.body.rotation.x = this.legAlpha; r.body.rotation.z = 0; } // held by the ankle: laid out along the giant swing (combat.legSwingStep)
       r.body.rotation.y = 0;
       // Superman punch lunge: stretch out along the dash (pitch the body toward the aim), eased in/out
       const lng = act && act.type === 'punch' && act.lunge && !act.done ? 1 : 0;
