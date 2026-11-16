@@ -30,12 +30,13 @@ const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
 Hero.viewer = camera; // used for the rigged models' LOD switch
-fx.viewer = camera; // sonic-boom vapour cone fades when the camera is inside it
+fx.viewer = camera; fx.destruction.cityRef = city; // sonic-boom vapour cone fades when the camera is inside it
 let idx = 0; heroes[0].setVisible(false); heroes[1].setVisible(false);
 heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 heroes[1].pos.set(-HALF + 20 * BLOCK + 9 + 40, 0, -HALF + 22 * BLOCK + 9); heroes[1].yaw = -Math.PI / 2;
 const input = new Input(renderer.domElement), cam = new ThirdPersonCamera(camera), hud = new HUD();
 const combat = new Combat(scene, fx, city, cam, hud);
+Hero.onCrash = (p, a) => combat.shakeNear(p, a);
 const NOINP = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, boost: 0, descend: 0 };
 
 // post-processing: HDR render -> subtle bloom -> ACES tone map + sRGB
@@ -57,6 +58,7 @@ quality = new QualityManager(q => {
   city.treeMesh.castShadow = q.shadow >= 2048; traffic.body.castShadow = q.shadow >= 1024;
   scene.fog.density = 0.00042 * 1700 / q.view;
   for (const h of heroes) h.setQuality?.(q);
+  fx.destruction.setQuality(q);
   if (quality) resize();
 });
 resize(); addEventListener('resize', resize);

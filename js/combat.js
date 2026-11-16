@@ -163,7 +163,9 @@ export class Combat {
     const lv = t2.copy(h.vel).applyAxisAngle(V(0, 1, 0), -h.yaw); // velocity in root space
     const axis = V(lv.z, 0, -lv.x); if (axis.lengthSq() < 1e-4) axis.set(1, 0, 0); axis.normalize();
     axis.x += (Math.random() - 0.5) * 0.6; axis.y += (Math.random() - 0.5) * 0.8; axis.normalize();
-    h.ragdoll = { q, av: axis.multiplyScalar(spin + Math.random() * 3), t: 0, rest: 0, getUp: 0, flail: 1, bounces: 0 };
+    // tumble rate follows the hit: harder hits spin you end over end faster
+    const sp = Math.min(16, Math.max(spin, h.vel.length() * 0.12));
+    h.ragdoll = { q, av: axis.multiplyScalar(sp + Math.random() * 3), t: 0, rest: 0, getUp: 0, flail: 1, bounces: 0, floor: 0 };
     h.state = 'air';
     if (h.pos.y < 0.05) h.pos.y = 0.05;
   }
@@ -177,6 +179,7 @@ export class Combat {
   releaseGrab(att) { const v = att.grabbing; if (v) v.grabbedBy = null; att.grabbing = null; if (att.action?.type === 'tackle') att.action.t = att.action.dur; }
   smash(att, victim, normal, hitPoint, speed) {
     const dmg = this.damage(victim, 6 + 0.36 * speed, att, 'building', { speed });
+    this.fx.crash(hitPoint.clone().setY(Math.max(0.5, hitPoint.y - 0.6)), normal, speed, 'wall');
     const pw = clamp(speed / 100, 0.4, 3);
     this.fx.impact(hitPoint, normal, pw, false);
     if (pw > 1.3) { this.fx.impact(hitPoint.clone().add(t4.set(0, 2.5, 0)), normal, pw * 0.6, false); this.fx.dustBurst(hitPoint.clone().setY(Math.max(0, hitPoint.y - 2)), 60 + speed * 0.3, 20 + speed * 0.1); }
@@ -404,7 +407,7 @@ export class Combat {
     for (let i = 0; i < steps; i++) {
       h.pos.addScaledVector(h.vel, dt / steps);
       const pre = t1.copy(h.vel), before = t2.copy(h.pos);
-      const floor = this.city.collide(h.pos, h.vel, r);
+      const floor = this.city.collide(h.pos, h.vel, r); rd.floor = floor;
       // bounce off walls; impact damage from speed into the wall (momentum)
       const dx = h.pos.x - before.x, dz = h.pos.z - before.z, pd = Math.hypot(dx, dz);
       if (pd > 1e-4) {
@@ -416,6 +419,7 @@ export class Combat {
             const hp = V(h.pos.x - n.x * r, h.pos.y + 0.9, h.pos.z - n.z * r);
             this.damage(h, 0.3 * into, null, 'wall', { speed: into });
             this.fx.impact(hp, n.clone(), clamp(into / 90, 0.3, 1.1), false); this.shakeNear(hp, 0.2 + into / 200);
+            if (into > 25 && this.t - (rd.lastCrashT ?? -9) > 0.3) { rd.lastCrashT = this.t; this.fx.crash(hp, n.clone(), into, 'wall'); }
           }
         }
       }
@@ -423,13 +427,24 @@ export class Combat {
         h.pos.y = floor; onGround = true;
         if (h.vel.y < -4) {
           const imp = -h.vel.y;
-          h.vel.y = imp * 0.32; h.vel.x *= 0.7; h.vel.z *= 0.7; rd.av.multiplyScalar(0.6); rd.bounces++;
+          h.vel.y = imp * 0.32; h.vel.x *= 0.75; h.vel.z *= 0.75; rd.av.multiplyScalar(0.6); rd.bounces++;
+          // glancing ground hits kick the body into a roll along the slide direction
+          const lv = t4.copy(h.vel).applyAxisAngle(t1.set(0, 1, 0), -h.yaw), hs = Math.hypot(lv.x, lv.z);
+          if (hs > 3) rd.av.add(t1.set(lv.z, 0, -lv.x).multiplyScalar(0.35 / 0.45)).add(t4.set(Math.random() - .5, Math.random() - .5, Math.random() - .5).multiplyScalar(2));
           if (imp > 10) this.fx.dustBurst(h.pos, 12 + Math.min(40, imp), 4 + Math.min(14, imp * 0.2));
-          if (imp > 30) { this.damage(h, 0.15 * imp, null, 'ground', { speed: imp }); this.fx.shockwave(h.pos, 0xd8d0c0, Math.min(20, imp * 0.3)); }
+          if (imp > 30) { this.damage(h, 0.15 * imp, null, 'ground', { speed: imp }); this.fx.shockwave(h.pos, 0xd8d0c0, Math.min(20, imp * 0.3)); this.fx.crash(h.pos.clone(), V(0, 1, 0), imp, 'ground'); this.shakeNear(h.pos, 0.15 + imp / 250); }
         } else { h.vel.y = 0; }
       }
     }
-    if (onGround && Math.abs(h.vel.y) < 0.5) { const f = Math.exp(-dt * 5); h.vel.x *= f; h.vel.z *= f; rd.av.multiplyScalar(Math.exp(-dt * 6)); }
+    if (onGround && Math.abs(h.vel.y) < 0.5) {
+      const hs = Math.hypot(h.vel.x, h.vel.z);
+      if (hs > 4) { // sliding / rolling along the ground: lower friction, spin blends toward rolling over the slide
+        const f = Math.exp(-dt * 1.8); h.vel.x *= f; h.vel.z *= f;
+        const lv = t4.copy(h.vel).applyAxisAngle(t1.set(0, 1, 0), -h.yaw);
+        rd.av.lerp(t1.set(lv.z, 0, -lv.x).normalize().multiplyScalar(Math.min(9, hs * 0.55 / 0.45)), Math.min(1, dt * 3));
+      } else { const f = Math.exp(-dt * 5); h.vel.x *= f; h.vel.z *= f; rd.av.multiplyScalar(Math.exp(-dt * 6)); }
+    }
+    if (rd.av.length() > 18) rd.av.setLength(18);
     rd.flail = clamp(h.vel.length() / 12 + rd.av.length() / 10, 0, 1);
     // integrate orientation (root-space angular velocity)
     const w = rd.av.length();

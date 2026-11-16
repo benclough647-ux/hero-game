@@ -321,6 +321,54 @@ const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'tack
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
 const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch']);
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3();
+// ---------- ragdoll joint layer ----------
+// Each driven bone gets a 3-DOF offset rotation (bone-local rotation vector) on top of the clip pose, integrated as a
+// damped pendulum: gravity, the body's linear/angular acceleration and spin (centrifugal) swing it, a weak spring pulls
+// it back toward the pose, and per-joint limits keep it human (elbows/knees are one-way hinges, spine stays modest).
+// lim = [xMin, xMax, yMin, yMax, zMin, zMax] in radians; k = spring, c = damping, len = bone reach (m)
+const RAG_JOINTS = [
+  ['spine', [-0.4, 0.4, -0.3, 0.3, -0.3, 0.3], 30, 5, 0.25],
+  ['chest', [-0.3, 0.3, -0.25, 0.25, -0.25, 0.25], 30, 5, 0.2],
+  ['upper_chest', [-0.25, 0.25, -0.2, 0.2, -0.2, 0.2], 30, 5, 0.2],
+  ['neck', [-0.5, 0.5, -0.6, 0.6, -0.4, 0.4], 14, 4, 0.15],
+  ['head', [-0.45, 0.45, -0.5, 0.5, -0.35, 0.35], 14, 4, 0.2],
+  ['upper_arm.L', [-1.5, 1.5, -0.7, 0.7, -1.4, 1.4], 3, 2.2, 0.3],
+  ['upper_arm.R', [-1.5, 1.5, -0.7, 0.7, -1.4, 1.4], 3, 2.2, 0.3],
+  ['forearm.L', 'elbow', 4, 2.4, 0.28],
+  ['forearm.R', 'elbow', 4, 2.4, 0.28],
+  ['thigh.L', [-1.0, 1.0, -0.35, 0.35, -0.6, 0.6], 6, 3, 0.42],
+  ['thigh.R', [-1.0, 1.0, -0.35, 0.35, -0.6, 0.6], 6, 3, 0.42],
+  ['shin.L', 'knee', 6, 3, 0.42],
+  ['shin.R', 'knee', 6, 3, 0.42],
+];
+const RAG_CLOTH = ['cape_L1', 'cape_L2', 'cape_L3', 'cape_L4', 'cape_M1', 'cape_M2', 'cape_M3', 'cape_M4', 'cape_R1', 'cape_R2', 'cape_R3', 'cape_R4', 'tail1', 'tail2', 'tail3'];
+const _rq = new THREE.Quaternion(), _rqi = new THREE.Quaternion(), _rd = new THREE.Vector3(), _rp = new THREE.Vector3(), _rr = new THREE.Vector3(), _ra = new THREE.Vector3(), _rt = new THREE.Vector3(), _rg = new THREE.Vector3(), _rw = new THREE.Vector3(), _rdw = new THREE.Vector3(), _rhip = new THREE.Vector3();
+function buildRagdoll(B, root, clips) {
+  const animated = new Set(); for (const c of Object.values(clips)) for (const t of c.tracks) animated.add(t.name.split('.').slice(0, -1).join('.').replace(/[.\s]/g, ''));
+  root.updateMatrixWorld(true);
+  const toRoot = (bone, local) => root.worldToLocal(bone.localToWorld(local.clone()));
+  const joints = [];
+  const add = (name, lim, k, c, len, cloth) => {
+    const bone = B(name); if (!bone) return;
+    let L = lim;
+    if (lim === 'elbow' || lim === 'knee') { // find the hinge axis/sign from the rest pose: knees fold the foot back (-Z), elbows bring the hand forward (+Z)
+      const want = lim === 'knee' ? -1 : 1, q0 = bone.quaternion.clone(), tip = new THREE.Vector3(0, len, 0);
+      let best = null;
+      for (const ax of ['x', 'z']) for (const sg of [1, -1]) {
+        const e = new THREE.Vector3(); e[ax] = 1; bone.quaternion.copy(q0).multiply(new THREE.Quaternion().setFromAxisAngle(e, 0.5 * sg)); bone.updateMatrixWorld(true);
+        const z = toRoot(bone, tip).z; if (!best || z * want > best.z * want) best = { ax, sg, z };
+      }
+      bone.quaternion.copy(q0); bone.updateMatrixWorld(true);
+      const max = lim === 'knee' ? 2.1 : 2.3, s = 0.12;
+      L = best.ax === 'x' ? (best.sg > 0 ? [0, max, -s, s, -s, s] : [-max, 0, -s, s, -s, s]) : (best.sg > 0 ? [-s, s, -s, s, 0, max] : [-s, s, -s, s, -max, 0]);
+      L.hinge = best.ax + (best.sg > 0 ? '+' : '-');
+    }
+    joints.push({ name, bone, lim: L, k, c, len, cloth: !!cloth, th: new THREE.Vector3(), w: new THREE.Vector3(), rest: animated.has(name.replace(/[.\s]/g, '')) ? null : bone.quaternion.clone() });
+  };
+  for (const [n, l, k, c, len] of RAG_JOINTS) add(n, l, k, c, len);
+  for (const n of RAG_CLOTH) add(n, n.startsWith('tail') ? [-1.0, 1.0, -0.8, 0.8, -1.0, 1.0] : [-1.4, 1.2, -0.25, 0.25, -0.5, 0.5], 3, 1.6, n.startsWith('tail') ? 0.14 : 0.34, true);
+  return { joints, hips: B('hips'), prevVel: new THREE.Vector3(), prevW: new THREE.Vector3(), active: false, w: 0 };
+}
 
 export class Hero {
   constructor(key, scene, effects) {
@@ -451,6 +499,7 @@ export class Hero {
     this.rig = { root, squash, body, model, lod: null, lodObjects: [scene], mohawks: collectMohawks(scene), hands: fists, feet, arms: [], legs: [], head: B('head') || model, cape: null };
     this.fists = fists; this.shoulders = null;
     this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
+    mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
     this.useGLB = true; this.useSkin = true; this.hipH = hipH;
     if (this.def.style === 'fire') {
       if (!this.glow) this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5);
@@ -468,7 +517,7 @@ export class Hero {
     let over = null, overW = 0;
     if (rd) {
       if (rd.getUp > 0 && has('getup')) { tgt.getup = 1; drive('getup', Math.min(1, rd.getUp) * acts.getup.getClip().duration); }
-      else { const fl = Math.min(1, rd.flail); tgt.fall = fl; tgt.down = 1 - fl; }
+      else { const fl = Math.min(1, rd.flail) * 0.35; tgt.fall = fl; tgt.down = 1 - fl; } // mostly the limp pose: the joint layer does the flailing
     } else {
       if (this.state === 'ground') {
         const run = Math.min(1, hs / 6); tgt.idle = 1 - run; tgt.run = run;
@@ -489,6 +538,7 @@ export class Hero {
     for (const n in acts) { A.w[n] += ((tgt[n] || 0) - A.w[n]) * Math.min(1, dt * rate); if (A.w[n] < 1e-3) A.w[n] = 0; sum += A.w[n]; }
     for (const n in acts) acts[n].setEffectiveWeight(sum > 0 ? A.w[n] / sum : (n === 'idle' ? 1 : 0));
     A.mixer.update(dt);
+    if (A.rag) this.ragdollJoints(dt, A.rag);
     // aim the striking arm at the target (pitch), compensating for whole-body lean
     if (!rd && act && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
       const k = A.w[act.type] / Math.max(sum, 1e-3);
@@ -504,6 +554,52 @@ export class Hero {
       const cam = Hero.viewer; const d = cam ? cam.position.distanceTo(this.pos) : 0;
       const low = this.qualityName === 'Low' ? d > 7 : d > 16;
       if (low !== A.lowNow) { A.lowNow = low; for (const m of A.lod0) m.visible = !low; for (const m of A.lod1) m.visible = low; }
+    }
+  }
+  ragdollJoints(dt, R) {
+    const rd = this.ragdoll, root = this.rig.root;
+    const target = rd ? (rd.getUp > 0 ? Math.pow(1 - Math.min(1, rd.getUp), 2) : 1) : 0;
+    R.w += (target - R.w) * Math.min(1, dt * (rd ? 12 : 6));
+    if (!rd && R.w < 0.01) { if (R.active) { for (const j of R.joints) { j.th.set(0, 0, 0); j.w.set(0, 0, 0); if (j.rest) j.bone.quaternion.copy(j.rest); } R.active = false; } return; }
+    if (!R.active) { R.active = true; R.prevVel.copy(this.vel); R.prevW.set(0, 0, 0); for (const j of R.joints) { j.th.set(0, 0, 0); j.w.set(0, 0, 0); } }
+    root.updateMatrixWorld(true);
+    // body motion in world space: linear acceleration, spin and spin-up (all felt by the limbs as inertial forces)
+    const h = Math.max(dt, 1e-3);
+    const acc = _ra.copy(this.vel).sub(R.prevVel).divideScalar(h); R.prevVel.copy(this.vel);
+    if (acc.length() > 900) acc.setLength(900);
+    root.getWorldQuaternion(_rq);
+    const wB = _rw.copy(rd ? rd.av : _rt.set(0, 0, 0)).applyQuaternion(_rq);
+    const dW = _rdw.copy(wB).sub(R.prevW).divideScalar(h); R.prevW.copy(wB); if (dW.length() > 400) dW.setLength(400);
+    const resting = rd && rd.rest > 0.1, floorY = rd?.floor ?? this.pos.y;
+    R.hips.getWorldPosition(_rhip);
+    const n = dt > 1 / 45 ? 2 : 1, sdt = dt / n;
+    for (const j of R.joints) {
+      if (j.rest) j.bone.quaternion.copy(j.rest); // un-animated (cloth) bones: start from their bind pose
+      j.bone.getWorldQuaternion(_rq); _rqi.copy(_rq).invert();
+      const d = _rd.set(0, 1, 0).applyQuaternion(_rq);
+      j.bone.getWorldPosition(_rp);
+      const r = _rr.copy(_rp).sub(_rhip).addScaledVector(d, j.len * 0.5);
+      // effective acceleration at the limb's centre (inertial frame of the tumbling body)
+      const g = _rg.set(0, -32, 0).sub(acc);
+      _rt.crossVectors(wB, r); g.sub(_rt.crossVectors(wB, _rt.clone())); g.sub(_rt.crossVectors(dW, r));
+      if (j.cloth) g.addScaledVector(this.vel, -1.5).add(_rt.set(0, -10, 0)); // cloth also feels the air rushing past
+      const alphaW = _rt.crossVectors(d, g).multiplyScalar(1.5 / j.len);
+      // limbs can't sink into the floor: push the tip back up and damp
+      const tipY = _rp.y + d.y * j.len; let cdamp = 0;
+      if (tipY < floorY + 0.06) { alphaW.add(_rg.crossVectors(d, _rp.set(0, (floorY + 0.06 - tipY) * 900, 0)).multiplyScalar(1 / j.len)); cdamp = 10; }
+      const aL = alphaW.applyQuaternion(_rqi);
+      const c = j.c + cdamp + (resting ? 9 : 0), k = j.k * (resting ? 1.5 : 1);
+      for (let s = 0; s < n; s++) {
+        j.w.x += (aL.x - k * j.th.x - c * j.w.x) * sdt; j.w.y += (aL.y - k * j.th.y - c * j.w.y) * sdt; j.w.z += (aL.z - k * j.th.z - c * j.w.z) * sdt;
+        if (j.w.length() > 30) j.w.setLength(30);
+        j.th.addScaledVector(j.w, sdt);
+        const L = j.lim; // joint limits: inelastic stop with a little bounce
+        if (j.th.x < L[0]) { j.th.x = L[0]; if (j.w.x < 0) j.w.x *= -0.15; } else if (j.th.x > L[1]) { j.th.x = L[1]; if (j.w.x > 0) j.w.x *= -0.15; }
+        if (j.th.y < L[2]) { j.th.y = L[2]; if (j.w.y < 0) j.w.y *= -0.15; } else if (j.th.y > L[3]) { j.th.y = L[3]; if (j.w.y > 0) j.w.y *= -0.15; }
+        if (j.th.z < L[4]) { j.th.z = L[4]; if (j.w.z < 0) j.w.z *= -0.15; } else if (j.th.z > L[5]) { j.th.z = L[5]; if (j.w.z > 0) j.w.z *= -0.15; }
+      }
+      const ang = j.th.length() * R.w;
+      if (ang > 1e-5) j.bone.quaternion.multiply(_rq.setFromAxisAngle(_rt.copy(j.th).divideScalar(j.th.length()), ang));
     }
   }
   setQuality(preset) { this.qualityName = preset?.name || 'High'; this.applyLodLevels(); }
@@ -582,7 +678,17 @@ export class Hero {
     let floor = 0;
     for (let i = 0; i < steps; i++) {
       this.pos.addScaledVector(this.vel, dt / steps);
+      const px = this.pos.x, pz = this.pos.z, pvx = this.vel.x, pvz = this.vel.z;
       floor = city.collide(this.pos, this.vel, 0.35 * (fire ? 1.3 : 1));
+      const cdx = this.pos.x - px, cdz = this.pos.z - pz, cd = Math.hypot(cdx, cdz);
+      if (cd > 1e-4) { // slammed into a building face at speed: dust plume, debris, crater
+        const nx = cdx / cd, nz = cdz / cd, into = -(pvx * nx + pvz * nz);
+        if (into > 60 && this.t - (this.lastCrashT ?? -9) > 0.35) {
+          this.lastCrashT = this.t; const r = 0.35 * (fire ? 1.3 : 1);
+          const hp = V(this.pos.x - nx * r, this.pos.y + 1.0, this.pos.z - nz * r), n = V(nx, 0, nz);
+          this.fx.crash(hp, n, into, 'wall'); this.fx.impact(hp, n, Math.min(2, into / 100), false); Hero.onCrash?.(hp, 0.25 + into / 220);
+        }
+      }
       if (this.pos.y <= floor) {
         this.pos.y = floor;
         if (this.vel.y < 0) {
@@ -623,6 +729,7 @@ export class Hero {
     if (hs > 6) { const c = Math.min(1, this.def.sprint * 1.6 / hs); this.vel.x *= c; this.vel.z *= c; this.sprintT = 1.4; } // dive -> sprint
     if (impact > 6 || hs > 20) this.fx.dustBurst(this.pos, 25 + Math.min(80, impact + hs * 0.3), 5 + Math.min(25, impact * 0.3 + hs * 0.08));
     if (impact > 35) this.fx.shockwave(this.pos, this.def.style === 'fire' ? 0xff7020 : 0xe8e2d0, Math.min(40, impact * 0.5));
+    if (impact > 55) { this.fx.crash(this.pos.clone(), V(0, 1, 0), impact, 'ground'); Hero.onCrash?.(this.pos, 0.2 + impact / 250); } // superhero landing crater
   }
   fireBurst(p, n, s) {
     const v = V(), c0 = new THREE.Color(5, 3, 0.9), c1 = new THREE.Color(3, 0.35, 0.04);

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Destruction } from './destruction.js';
 // Pooled particle systems (HDR fire for bloom, dust puffs, water spray) + expanding shockwave rings.
 function softTexture(kind) {
   const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
@@ -106,6 +107,7 @@ export class Effects {
     this.booms = []; this.vaporTex = vaporTexture();
     this.coneGeo = new THREE.ConeGeometry(1, 1, 48, 1, true); this.coneGeo.translate(0, -0.5, 0); // apex at origin, opening towards -Y
     this.streaks = new Streaks(scene); this.streakTint = new THREE.Color(1.4, 1.5, 1.7);
+    this.destruction = new Destruction(scene);
     this.cSpray0 = new THREE.Color(1.6, 1.7, 1.8); this.cSpray1 = new THREE.Color(0.75, 0.82, 0.88);
   }
   shockwave(p, color = 0xffffff, maxR = 25) {
@@ -173,9 +175,11 @@ export class Effects {
     for (let i = 0; i < 8 + 18 * power; i++) { V.copy(normal).multiplyScalar(3 + Math.random() * 10).add(P.set((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 8, (Math.random() - 0.5) * 12)); this.dust.emit(p, V, 1 + Math.random() * 1.5, d, d1); }
     this.flash(p, 0xffb060, 40 * power + 20, 0.35);
   }
+  // crash into a wall/ground at speed: lingering dust plume, debris chunks, persistent crater
+  crash(p, normal, speed, kind = 'wall') { return this.destruction.crash(p, normal, speed, kind); }
   flash(p, color, intensity, dur = 0.25) { this.light.position.copy(p); this.light.color.setHex(color); this.light.intensity = Math.max(this.light.intensity, intensity * 8); this.lightT = dur; this.lightDur = dur; }
   update(dt) {
-    this.debris.update(dt, -30); this.spark.update(dt, -12);
+    this.debris.update(dt, -30); this.spark.update(dt, -12); this.destruction.update(dt);
     if (this.lightT > 0) { this.lightT -= dt; if (this.lightT <= 0) this.light.intensity = 0; else this.light.intensity *= Math.exp(-dt * 5 / this.lightDur); }
     this.fire.update(dt, 6); this.dust.update(dt, 0.8); this.spray.update(dt, -26);
     this.booms = this.booms.filter(b => { b.t += dt / b.dur; const e = 1 - Math.pow(1 - Math.min(1, b.t), 3), k = b.k || 1;
