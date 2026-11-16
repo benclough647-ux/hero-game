@@ -371,66 +371,111 @@ function buildRagdoll(B, root, clips) {
   return { joints, hips: B('hips'), prevVel: new THREE.Vector3(), prevW: new THREE.Vector3(), active: false, w: 0 };
 }
 
-// ---------- Centurion eye beam: eye emitters on the head bone + additive upper-body 'eye_beam' clip ----------
-// Eye locations come from the skinned body itself: head-weighted vertices in the bind pose give the face front/height.
-function findEyes(scene, headBone, root) {
+// ---------- player beam moves: Centurion eye beam / Tiger roar blast ----------
+// Emitters come from the skinned body itself: head-weighted vertices in the bind pose give the face front/height.
+function headPoints(scene, headBone, root) {
   root.updateMatrixWorld(true);
   let body = null; scene.traverse(o => { if (o.isSkinnedMesh && !/lod1|cape/i.test(o.name) && (!body || o.geometry.attributes.position.count > body.geometry.attributes.position.count)) body = o; });
-  const out = [];
+  const pts = [];
   if (body) {
-    const hi = body.skeleton.bones.indexOf(headBone), g = body.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, pos = g.attributes.position, v = new THREE.Vector3(), pts = [];
+    const hi = body.skeleton.bones.indexOf(headBone), g = body.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, pos = g.attributes.position, v = new THREE.Vector3();
     for (let i = 0; i < pos.count; i += 1) {
       let w = 0; for (let k = 0; k < 4; k++) if (si.getComponent(i, k) === hi) w += sw.getComponent(i, k);
       if (w < 0.6) continue;
       v.fromBufferAttribute(pos, i); body.applyBoneTransform(i, v); body.localToWorld(v); root.worldToLocal(v); pts.push(v.clone());
     }
-    if (pts.length > 30) {
-      let y0 = Infinity, y1 = -Infinity, x1 = 0; for (const p of pts) { y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); x1 = Math.max(x1, Math.abs(p.x)); }
-      const ey = y0 + 0.5 * (y1 - y0), ex = x1 * 0.36;
-      for (const sx of [-1, 1]) { // front-most point of the face at eye height on each side
-        let best = null; for (const p of pts) if (Math.abs(p.y - ey) < 0.025 && Math.abs(p.x - sx * ex) < 0.02 && (!best || p.z > best.z)) best = p;
-        if (best) out.push(new THREE.Vector3(best.x, best.y, best.z + 0.004));
-      }
-    }
+  }
+  let y0 = Infinity, y1 = -Infinity, x1 = 0; for (const p of pts) { y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); x1 = Math.max(x1, Math.abs(p.x)); }
+  return { pts, y0, y1, x1, ok: pts.length > 30 };
+}
+const frontAt = (pts, x, y, dy, dx) => { let best = null; for (const p of pts) if (Math.abs(p.y - y) < dy && Math.abs(p.x - x) < dx && (!best || p.z > best.z)) best = p; return best; };
+function emitterOn(headBone, root, p, name) { const o = new THREE.Object3D(); o.name = name; headBone.add(o); o.position.copy(headBone.worldToLocal(root.localToWorld(p.clone()))); return o; }
+function findEyes(scene, headBone, root) {
+  const H = headPoints(scene, headBone, root), out = [];
+  if (H.ok) {
+    const ey = H.y0 + 0.5 * (H.y1 - H.y0), ex = H.x1 * 0.36;
+    for (const sx of [-1, 1]) { const best = frontAt(H.pts, sx * ex, ey, 0.025, 0.02); if (best) out.push(new THREE.Vector3(best.x, best.y, best.z + 0.004)); }
   }
   if (out.length !== 2) { // fallback: offsets from the head bone
     const hp = headBone.getWorldPosition(new THREE.Vector3()); root.worldToLocal(hp);
     out.length = 0; for (const sx of [-1, 1]) out.push(new THREE.Vector3(hp.x + sx * 0.033, hp.y + 0.08, hp.z + 0.1));
   }
-  return out.map(p => { const o = new THREE.Object3D(); o.name = 'eye'; headBone.add(o); o.position.copy(headBone.worldToLocal(root.localToWorld(p.clone()))); return o; });
+  return out.map(p => emitterOn(headBone, root, p, 'eye'));
 }
-// additive clip: frame 0 = reference pose, then braced beam pose (lean back, head thrust forward, fists low and back)
-function buildEyeBeamClip(B, root) {
+function findMouth(scene, headBone, root) {
+  const H = headPoints(scene, headBone, root); let p = null;
+  if (H.ok) { const best = frontAt(H.pts, 0, H.y0 + 0.27 * (H.y1 - H.y0), 0.03, 0.025); if (best) p = new THREE.Vector3(best.x, best.y, best.z + 0.01); }
+  if (!p) { p = headBone.getWorldPosition(new THREE.Vector3()); root.worldToLocal(p); p.y += 0.03; p.z += 0.12; }
+  return emitterOn(headBone, root, p, 'mouth');
+}
+// Pose specs are model-space offsets from the reference (idle) pose, applied parent-first:
+//   rot: pitch about model X (+ = forward) · axis+ang: any model-space axis · dir: aim the bone's +Y along a model-space direction · twist: about the bone's own axis
+const EYE_BEAM_POSE = [
+  ['spine', { rot: -0.1 }], ['chest', { rot: -0.05 }], ['upper_chest', { rot: -0.04 }],
+  ['shoulder.L', { rot: -0.08 }], ['shoulder.R', { rot: -0.08 }],
+  ['neck', { rot: 0.24 }], ['head', { rot: -0.14 }],
+  ['upper_arm.L', { dir: [0.2, -1, -0.24] }], ['upper_arm.R', { dir: [-0.2, -1, -0.24] }],
+  ['forearm.L', { dir: [0.12, -1, -0.34] }], ['forearm.R', { dir: [-0.12, -1, -0.34] }],
+  ['hand.L', { dir: [0.06, -1, -0.15] }], ['hand.R', { dir: [-0.06, -1, -0.15] }],
+];
+// Tiger roar: wind-up (head rears back, chest pulls up, arms drawn back) ...
+const ROAR_WINDUP_POSE = [
+  ['spine', { rot: -0.16 }], ['chest', { rot: -0.1 }], ['upper_chest', { rot: -0.08 }],
+  ['shoulder.L', { axis: [0.2, 0, 1], ang: 0.12 }], ['shoulder.R', { axis: [0.2, 0, -1], ang: 0.12 }],
+  ['neck', { rot: -0.18 }], ['head', { rot: -0.38 }],
+  ['upper_arm.L', { dir: [0.75, -0.55, -0.38] }], ['upper_arm.R', { dir: [-0.75, -0.55, -0.38] }],
+  ['forearm.L', { dir: [0.7, -0.4, 0.2], twist: -0.4 }], ['forearm.R', { dir: [-0.7, -0.4, 0.2], twist: 0.4 }],
+  ['hand.L', { dir: [0.45, -0.75, 0.45] }], ['hand.R', { dir: [-0.45, -0.75, 0.45] }],
+];
+// ... then the roar: chest out, head snapped forward, shoulders hunched, arms out to the sides / slightly forward,
+// claws tensed (no finger bones: wrists curled down/in + forearms twisted), legs braced wide with bent knees
+const ROAR_POSE = [
+  ['spine', { rot: -0.1 }], ['chest', { rot: -0.09 }], ['upper_chest', { rot: -0.09 }],
+  ['shoulder.L', { axis: [0.5, 0, 1], ang: 0.24 }], ['shoulder.R', { axis: [0.5, 0, -1], ang: 0.24 }],
+  ['neck', { rot: 0.36 }], ['head', { rot: -0.06 }],
+  ['upper_arm.L', { dir: [0.86, -0.3, 0.42] }], ['upper_arm.R', { dir: [-0.86, -0.3, 0.42] }],
+  ['forearm.L', { dir: [0.5, -0.12, 0.86], twist: -0.55 }], ['forearm.R', { dir: [-0.5, -0.12, 0.86], twist: 0.55 }],
+  ['hand.L', { dir: [0.15, -0.8, 0.6], twist: -0.3 }], ['hand.R', { dir: [-0.15, -0.8, 0.6], twist: 0.3 }],
+  ['thigh.L', { dir: [0.3, -1, 0.16] }], ['thigh.R', { dir: [-0.3, -1, 0.16] }],
+  ['shin.L', { dir: [0.22, -1, -0.12] }], ['shin.R', { dir: [-0.22, -1, -0.12] }],
+];
+// Build an additive clip: keyframe 0 = reference pose; frames = [poseIndex (-1 = reference), weight] at times[]
+function buildPoseClip(B, root, name, poses, times, frames) {
   root.updateMatrixWorld(true);
-  const rootQ = root.getWorldQuaternion(new THREE.Quaternion()), rootQi = rootQ.clone().invert();
-  const modelQ = b => rootQi.clone().multiply(b.getWorldQuaternion(new THREE.Quaternion())); // bone orientation in root (model) space
-  const X = new THREE.Vector3(1, 0, 0);
-  const spec = [
-    ['spine', { rot: -0.1 }], ['chest', { rot: -0.05 }], ['upper_chest', { rot: -0.04 }],
-    ['shoulder.L', { rot: -0.08 }], ['shoulder.R', { rot: -0.08 }],
-    ['neck', { rot: 0.24 }], ['head', { rot: -0.14 }],
-    ['upper_arm.L', { dir: [0.2, -1, -0.24] }], ['upper_arm.R', { dir: [-0.2, -1, -0.24] }],
-    ['forearm.L', { dir: [0.12, -1, -0.34] }], ['forearm.R', { dir: [-0.12, -1, -0.34] }],
-    ['hand.L', { dir: [0.06, -1, -0.15] }], ['hand.R', { dir: [-0.06, -1, -0.15] }],
-  ];
-  const tracks = [], saved = [];
-  for (const [n, s] of spec) {
-    const b = B(n); if (!b) continue;
-    const q0 = b.quaternion.clone(); saved.push([b, q0]);
-    const qm = modelQ(b); let offM;
-    if (s.rot !== undefined) offM = new THREE.Quaternion().setFromAxisAngle(X, s.rot);
-    else offM = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0).applyQuaternion(qm), new THREE.Vector3(...s.dir).normalize());
-    const offL = qm.clone().invert().multiply(offM).multiply(qm); // model-space rotation expressed in the bone's frame
-    const T = q0.clone().multiply(offL), Tb = q0.clone().slerp(T, 0.9);
-    b.quaternion.copy(T); b.updateMatrixWorld(true); // children are posed relative to the new parent pose
-    const vals = []; for (const q of [q0, T, Tb, T, Tb]) vals.push(q.x, q.y, q.z, q.w);
-    tracks.push(new THREE.QuaternionKeyframeTrack(b.name + '.quaternion', [0, 0.12, 0.3, 0.45, 0.6], vals));
+  const rootQi = root.getWorldQuaternion(new THREE.Quaternion()).invert();
+  const modelQ = b => rootQi.clone().multiply(b.getWorldQuaternion(new THREE.Quaternion()));
+  const X = new THREE.Vector3(1, 0, 0), Y = new THREE.Vector3(0, 1, 0);
+  const bones = new Map(); // bone -> { q0, targets[] }
+  for (const spec of poses) for (const [n] of spec) { const b = B(n); if (b && !bones.has(b)) bones.set(b, { q0: b.quaternion.clone(), T: [] }); }
+  poses.forEach((spec, pi) => {
+    for (const [n, s] of spec) {
+      const b = B(n); if (!b) continue;
+      const qm = modelQ(b); let offM;
+      if (s.rot !== undefined) offM = new THREE.Quaternion().setFromAxisAngle(X, s.rot);
+      else if (s.axis) offM = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(...s.axis).normalize(), s.ang);
+      else offM = new THREE.Quaternion().setFromUnitVectors(Y.clone().applyQuaternion(qm), new THREE.Vector3(...s.dir).normalize());
+      const offL = qm.clone().invert().multiply(offM).multiply(qm); // model-space rotation expressed in the bone's frame
+      if (s.twist) offL.multiply(new THREE.Quaternion().setFromAxisAngle(Y, s.twist));
+      const T = b.quaternion.clone().multiply(offL);
+      b.quaternion.copy(T); b.updateMatrixWorld(true); bones.get(b).T[pi] = T; // children are posed relative to the new parent pose
+    }
+    for (const [b, e] of bones) { b.quaternion.copy(e.q0); } root.updateMatrixWorld(true);
+  });
+  const tracks = [];
+  for (const [b, e] of bones) {
+    const vals = [];
+    for (const [pi, k] of frames) { const T = pi >= 0 && e.T[pi] ? e.T[pi] : e.q0; const q = e.q0.clone().slerp(T, k); vals.push(q.x, q.y, q.z, q.w); }
+    tracks.push(new THREE.QuaternionKeyframeTrack(b.name + '.quaternion', times, vals));
   }
-  for (const [b, q] of saved) b.quaternion.copy(q); root.updateMatrixWorld(true);
-  const clip = new THREE.AnimationClip('eye_beam', 0.6, tracks);
+  const clip = new THREE.AnimationClip(name, times[times.length - 1], tracks);
   THREE.AnimationUtils.makeClipAdditive(clip, 0);
   return clip;
 }
+// per hero: emitter-glow colour, clip, and how the clip time maps to the action (intro, then loop [start, start+period))
+const BEAM_MOVES = {
+  clean: { clip: 'eye_beam', poses: [EYE_BEAM_POSE], times: [0, 0.12, 0.3, 0.45, 0.6], frames: [[-1, 1], [0, 1], [0, 0.9], [0, 1], [0, 0.9]], loop: [0.12, 0.48] },
+  fire: { clip: 'roar_blast', poses: [ROAR_WINDUP_POSE, ROAR_POSE], times: [0, 0.13, 0.24, 0.46, 0.68], frames: [[-1, 1], [0, 1], [1, 1], [1, 0.88], [1, 1]], loop: [0.24, 0.44] },
+};
 const _hb = new THREE.Vector3(), _hf = new THREE.Vector3(), _hq = new THREE.Quaternion(), _hq2 = new THREE.Quaternion();
 
 export class Hero {
@@ -563,15 +608,17 @@ export class Hero {
     this.fists = fists; this.shoulders = null;
     this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
     mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
-    if (this.def.style === 'clean' && B('head')) {
-      const head = B('head'); this.eyes = findEyes(scene, head, root);
-      const glowMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 5, 6), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+    const BM = BEAM_MOVES[this.def.style];
+    if (BM && B('head')) {
+      const head = B('head'), fire = this.def.style === 'fire';
+      if (fire) this.mouth = findMouth(scene, head, root); else this.eyes = findEyes(scene, head, root);
+      const glowMat = new THREE.MeshBasicMaterial({ color: fire ? new THREE.Color(8, 3, 0.6) : new THREE.Color(4, 5, 6), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
       const sph = new THREE.SphereGeometry(1, 10, 8);
-      this.eyeGlows = this.eyes.map(e => { const m = new THREE.Mesh(sph, glowMat); m.scale.setScalar(0.012); m.renderOrder = 5; m.frustumCulled = false; e.add(m); return m; });
-      this.eyeGlowMat = glowMat; this.eyeGlow = 0;
-      const clip = buildEyeBeamClip(B, root), act = mixer.clipAction(clip);
+      this.eyeGlows = (fire ? [this.mouth] : this.eyes).map(e => { const m = new THREE.Mesh(sph, glowMat); m.scale.setScalar(0.012); m.renderOrder = 5; m.frustumCulled = false; e.add(m); return m; });
+      this.eyeGlowMat = glowMat; this.eyeGlow = 0; this.glowSize = fire ? 0.04 : 0.03;
+      const clip = buildPoseClip(B, root, BM.clip, BM.poses, BM.times, BM.frames), act = mixer.clipAction(clip);
       act.blendMode = THREE.AdditiveAnimationBlendMode; act.setLoop(THREE.LoopRepeat, Infinity); act.play(); act.setEffectiveTimeScale(0); act.setEffectiveWeight(0);
-      this.anim.beamAct = act; this.anim.beamW = 0;
+      this.anim.beamAct = act; this.anim.beamW = 0; this.anim.beamLoop = BM.loop; this.anim.beamClip = BM.clip;
       root.updateMatrixWorld(true); // face direction in the head bone's frame (model faces +Z)
       this.anim.faceLocal = new THREE.Vector3(0, 0, 1).applyQuaternion(root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
     }
@@ -620,12 +667,12 @@ export class Hero {
     if (A.beamAct) { // eye_beam additive layer
       const on = !rd && act && act.beam ? 1 : 0; A.beamW += (on - A.beamW) * Math.min(1, dt * 12);
       A.beamAct.setEffectiveWeight(A.beamW < 1e-3 ? 0 : A.beamW);
-      const bt = act && act.beam ? act.t : 0.6; A.beamAct.time = bt < 0.12 ? bt : 0.12 + ((bt - 0.12) % 0.48);
+      const [l0, lp] = A.beamLoop, bt = act && act.beam ? act.t : l0 + lp; A.beamAct.time = bt < l0 ? bt : l0 + ((bt - l0) % lp);
     }
     A.mixer.update(dt);
     if (A.rag) this.ragdollJoints(dt, A.rag);
-    if (A.beamAct && A.beamW > 0.01) this.trackHead(A.beamW);
-    if (this.eyeGlowMat) { const gl = this.eyeGlow || 0; this.eyeGlowMat.opacity = Math.min(1, gl * 1.2); for (const m of this.eyeGlows) m.scale.setScalar(0.01 + 0.03 * gl * (0.85 + 0.15 * Math.sin(this.t * 40))); }
+    if (A.beamAct && A.beamW > 0.01) this.trackHead(A.beamW * (act?.beam && act.t < A.beamLoop[0] ? 0.2 : 1)); // light tracking during the wind-up so the head can rear back
+    if (this.eyeGlowMat) { const gl = this.eyeGlow || 0; this.eyeGlowMat.opacity = Math.min(1, gl * 1.2); for (const m of this.eyeGlows) m.scale.setScalar(0.01 + this.glowSize * gl * (0.85 + 0.15 * Math.sin(this.t * 40))); }
     this.chokePose(dt);
     // aim the striking arm at the target (pitch), compensating for whole-body lean
     if (!rd && act && !act.beam && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
@@ -709,6 +756,7 @@ export class Hero {
       bone.getWorldQuaternion(_hq); _hq.premultiply(_hq2); bone.parent.getWorldQuaternion(_cp); bone.quaternion.copy(_cp.invert().multiply(_hq)); bone.updateMatrixWorld(true);
     }
   }
+  mouthPosition(out) { if (!this.mouth) return null; this.rig.root.updateMatrixWorld(true); return this.mouth.getWorldPosition(out); }
   eyePositions(out) { if (!this.eyes) return null; this.rig.root.updateMatrixWorld(true); return this.eyes.map((e, i) => e.getWorldPosition(out[i])); }
   // ---- choke hold posing on the skinned rig (attacker: arm up gripping the throat, other fist cocked; victim: dangling, clawing) ----
   aimBone(bone, dir, w = 1) {
@@ -1032,14 +1080,14 @@ export class Hero {
     for (let i = 0; i < mh.nodes.length; i++) {
       const n = mh.nodes[i], b = n.userData.baseScale || n.scale;
       const flicker = 0.08 * Math.sin(t * 17 + i) + 0.05 * Math.sin(t * 29 + i * 1.7);
-      const wave = 0.14 * Math.sin(t * 22 + i * 2) + 0.04 * Math.sin(t * 7.5);
-      n.scale.set(b.x * (1 + flicker), b.y * (1 + wave), b.z * (1 + flicker * 0.8));
+      const wave = 0.14 * Math.sin(t * 22 + i * 2) + 0.04 * Math.sin(t * 7.5), flare = this.eyeGlow || 0; // roar: mohawk flares up
+      n.scale.set(b.x * (1 + flicker) * (1 + 0.25 * flare), b.y * (1 + wave) * (1 + 0.8 * flare), b.z * (1 + flicker * 0.8) * (1 + 0.25 * flare));
       n.rotation.z = Math.sin(t * 11 + i) * 0.06;
       n.rotation.x = Math.sin(t * 8.5 + i * 0.6) * 0.04;
     }
     for (const m of mh.mats) {
       const base = m.userData.baseEmissive || 3;
-      m.emissiveIntensity = base * (0.82 + 0.28 * Math.sin(t * 14) + 0.1 * Math.sin(t * 31));
+      m.emissiveIntensity = base * (0.82 + 0.28 * Math.sin(t * 14) + 0.1 * Math.sin(t * 31)) * (1 + 2.2 * (this.eyeGlow || 0));
     }
   }
   fireFx(dt, fly) {

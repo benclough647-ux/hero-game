@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { whooshSound } from './audio.js';
-// Combat: player vs computer-controlled rival (Tiger <-> Centurion), ranged blasts (fire / Centurion eye beam),
+import { whooshSound, roarSound, fireBlastSound } from './audio.js';
+// Combat: player vs computer-controlled rival (Tiger <-> Centurion), player-only beams (Tiger roar blast / Centurion eye beam),
 // tackle-grab that can smash the target into buildings, super punch with ragdoll, momentum-based damage,
 // procedural ragdoll with building/ground collisions, KO + respawn, and the AI opponent.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -13,7 +13,10 @@ export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
 // choke grab (tackle connects): hold time, charged punch / spin throw / forward drive tuning
 export const CHOKE = { hold: 5, chargeT: 1.0, spinT: 0.85, spinTurns: 1.5, throwSpeed: 220, driveStick: 0.6 };
 // Centurion eye beam (player only): charge-up, sustained beam while RT is held, push + tumble scaled by beam time
-export const EYE = { charge: 0.16, min: 0.35, max: 1.8, dps: 24, range: 300 };
+export const EYE = { charge: 0.16, min: 0.35, max: 1.8, dps: 24, range: 300, hitR: 1.6, snap: 0.9 };
+// Tiger roar blast (player only): same push / damage / ragdoll as the eye beam, but a wide cone of fire from the mouth.
+// The cone radius at distance d is r0 + spread*d; anything whose body overlaps it is hit.
+export const ROAR = { charge: 0.24, min: 0.4, max: 1.8, dps: 24, range: 140, r0: 0.3, spread: 0.13, body: 0.7, snap: 0.86 };
 export const DASH = { speed: 170, max: 34, free: 14, stop: 2.0, maxT: 0.32, assist: 32 };
 
 // screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
@@ -41,6 +44,33 @@ class AIBrain {
   constructor() { this.t = 0; this.strafe = 1; this.strafeT = 0; this.think = 0; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; }
 }
 
+const ROAR_VS = `uniform float r0, r1, len, t; varying float vz; varying vec3 vP; varying vec3 vN; varying vec3 vV;
+void main() {
+  vec3 p = position; float z = p.z, a = atan(p.y, p.x);
+  float r = mix(r0, r1, pow(z, 0.8)) * (1.0 + 0.13 * sin(z * len * 0.3 - t * 17.0 + a * 3.0) + 0.07 * sin(z * len * 0.7 - t * 29.0 - a * 5.0));
+  vN = normalize(mat3(modelMatrix) * vec3(p.xy, 0.0));
+  p.xy *= r; p.z = z * len; vz = z; vP = vec3(cos(a), sin(a), z * len);
+  vec4 wp = modelMatrix * vec4(p, 1.0); vV = normalize(cameraPosition - wp.xyz);
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+const ROAR_FS = `uniform float t, op, hot; varying float vz; varying vec3 vP; varying vec3 vN; varying vec3 vV;
+float h(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float n3(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(h(i), h(i + vec3(1,0,0)), f.x), mix(h(i + vec3(0,1,0)), h(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h(i + vec3(0,0,1)), h(i + vec3(1,0,1)), f.x), mix(h(i + vec3(0,1,1)), h(i + vec3(1,1,1)), f.x), f.y), f.z); }
+float fbm(vec3 p) { float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { v += a * n3(p); p *= 2.07; a *= 0.5; } return v; }
+void main() {
+  vec3 q = vec3(vP.xy * 1.6, vP.z * 0.22 - t * 11.0);
+  float n = fbm(q + vec3(0.0, 0.0, fbm(q * 0.7 + t) * 1.5));
+  float facing = abs(dot(normalize(vN), normalize(vV)));
+  float fade = smoothstep(1.0, 0.72, vz) * smoothstep(0.0, 0.03, vz);
+  float f = clamp(n * 1.9 - 0.45 + hot * 0.35, 0.0, 1.0);
+  vec3 col = mix(vec3(1.2, 0.12, 0.01), vec3(2.8, 0.9, 0.12), f);
+  col = mix(col, vec3(3.6, 2.4, 0.9), smoothstep(0.7, 1.0, f) * (0.3 + 0.7 * hot));
+  float a = f * mix(0.3, 1.0, pow(facing, 1.1)) * fade * op * (hot > 0.5 ? 0.85 : 0.7);
+  gl_FragColor = vec4(col, a);
+}`;
+
 export class Combat {
   constructor(scene, fx, city, cam, hud) {
     this.scene = scene; this.fx = fx; this.city = city; this.cam = cam; this.hud = hud;
@@ -58,6 +88,12 @@ export class Combat {
     const glowM = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.8, 1.5, 0.8), transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
     this.eyeMeshes = [0, 1].map(() => { const c = new THREE.Mesh(g, coreM), w = new THREE.Mesh(g, glowM); for (const m of [c, w]) { m.visible = false; m.frustumCulled = false; m.renderOrder = 6; scene.add(m); } return { c, w }; });
     this.eyeGlowM = glowM; this.eyeBeam = null; this._eyes = [V(), V()];
+    // roar blast cone: two additive shader cones (outer roiling fire + hot inner core), radius flares with distance
+    const cg = new THREE.CylinderGeometry(1, 1, 1, 40, 32, true); cg.translate(0, 0.5, 0); cg.rotateX(Math.PI / 2);
+    const mkCone = hot => new THREE.Mesh(cg, new THREE.ShaderMaterial({
+      uniforms: { t: { value: 0 }, r0: { value: 0.3 }, r1: { value: 5 }, len: { value: 30 }, op: { value: 1 }, hot: { value: hot } },
+      vertexShader: ROAR_VS, fragmentShader: ROAR_FS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+    this.roarCones = [mkCone(0), mkCone(1)]; for (const m of this.roarCones) { m.visible = false; m.frustumCulled = false; m.renderOrder = 6; scene.add(m); }
     this.cFire0 = new THREE.Color(6, 3.4, 0.9); this.cFire1 = new THREE.Color(3, 0.35, 0.04);
     this.cGold0 = new THREE.Color(7, 6, 3.5); this.cGold1 = new THREE.Color(2.5, 1.6, 0.4);
     this.lockOn = false; this.lockLostT = 0; this.lockPop = 0; this.reticle = makeReticle(); scene.add(this.reticle);
@@ -106,10 +142,10 @@ export class Combat {
   // target: hero to track during the move (lock-on / aim assist), or null
   start(h, type, aim, target = null) {
     if (!this.canAct(h) || h.cd[type] > 0) return false;
-    if (type === 'blast' && h.def.style === 'clean' && this.player && h !== this.player) return false; // Centurion's light/eye beam is player-only
+    if (type === 'blast' && this.player && h !== this.player) return false; // eye beam / roar blast are player-only (the AI has no ranged blast)
     h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
     h.cd[type] = MOVES[type].cd;
-    if (type === 'blast' && h.def.style === 'clean') { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
+    if (type === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
     if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.def.tackleSpeed * 1.25;
       h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.def.tackleSpeed * 0.6)); // explosive launch
       if (h.def.style === 'fire') h.fireBurst(h.pos, 70, 20); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 18); this.shakeNear(h.pos, 0.25); }
@@ -470,40 +506,53 @@ export class Combat {
     for (let i = 0; i < n; i++) P.emit(p, t4.set((Math.random() - .5) * s * 2, (Math.random() - .5) * s * 2, (Math.random() - .5) * s * 2), 0.25 + Math.random() * 0.35, c0, c1);
   }
 
-  // ---------- Centurion eye beam ----------
-  eyeMid(a, out) {
+  // ---------- player beam moves: Centurion eye beam / Tiger roar blast ----------
+  beamOrigin(a, out) {
+    if (a.mouth) return a.mouthPosition(out);
     const e = a.eyePositions?.(this._eyes);
     if (e) return out.copy(e[0]).add(e[1]).multiplyScalar(0.5);
     return this.chest(a, out).setY(a.pos.y + 1.62 * a.def.height / 1.83);
   }
+  eyeMid(a, out) { return this.beamOrigin(a, out); }
   eyeBeamStep(dt, a, b, act) {
+    const roar = a.def.style === 'fire', C = roar ? ROAR : EYE, kind = roar ? 'roar' : 'eyebeam';
     const isP = a === this.player, inp = isP ? this.pInp : null;
-    a.eyeGlow = Math.min(1, act.t / EYE.charge);
-    const mid = this.eyeMid(a, V());
+    if (roar && !act.sfx) act.sfx = roarSound() || { stop() {} };
+    a.eyeGlow = Math.min(1, act.t / C.charge);
+    const mid = this.beamOrigin(a, V());
     const lock = isP ? this.lockTarget(b) : null;
     let dir;
     if (lock) dir = this.chest(b, V()).sub(mid).normalize();
     else { const fwd = isP && this.camFwd ? this.camFwd : a.aim; const to = this.chest(b, V()).sub(mid); const d = to.length(); to.divideScalar(d || 1);
-      dir = (!b.ko && d < 260 && (to.dot(fwd) > 0.9 || d < 5)) ? to : fwd.clone().normalize(); }
+      dir = (!b.ko && d < 260 && (to.dot(fwd) > C.snap || d < 5)) ? to : fwd.clone().normalize(); }
     a.aim.lerp(dir, Math.min(1, dt * 14)).normalize(); dir = a.aim.clone();
-    if (act.t < EYE.charge) { a.beamTarget = mid.clone().addScaledVector(dir, 30); this.eyeBeam = { owner: a, on: false }; return; }
+    if (act.t < C.charge) { // wind-up
+      a.beamTarget = mid.clone().addScaledVector(dir, 30); this.eyeBeam = { owner: a, on: false, roar, sfx: act.sfx };
+      if (roar) { // embers gathering at the mouth
+        for (let i = 0; i < 6; i++) { const p = t3.set(Math.random() - .5, Math.random() - .5, Math.random() - .5).normalize().multiplyScalar(0.5 + Math.random() * 0.7).add(mid); this.fx.fire.emit(p, t4.subVectors(mid, p).multiplyScalar(5), 0.18, this.cFire0, this.cFire1); }
+        if (this.fx.lightT <= 0.05) { this.fx.light.position.copy(mid); this.fx.light.color.setHex(0xff6a20); this.fx.light.intensity = 60 + 300 * a.eyeGlow; this.fx.lightT = 0.06; this.fx.lightDur = 0.06; }
+      }
+      return;
+    }
+    if (roar && !act.snapped) { act.snapped = true; for (let i = 0; i < 40; i++) this.fx.fire.emit(mid, t3.copy(dir).multiplyScalar(20 + Math.random() * 30).add(t4.set((Math.random() - .5) * 14, (Math.random() - .5) * 14, (Math.random() - .5) * 14)), 0.15 + Math.random() * 0.2, this.cFire0, this.cFire1); /* the snap: burst of flame at the mouth */ if (isP) this.shakeNear(mid, 0.2); }
     act.onT += dt;
-    // march the beam: first building / ground, or the opponent if they're closer
-    let len = EYE.range, hit = null;
-    for (let s = 0.5; s < EYE.range; s += 1.5) {
+    // march the beam centre line: first building / ground; the target is hit if it overlaps the beam (wide cone for the roar)
+    let len = C.range, hit = null;
+    for (let s = 0.5; s < C.range; s += 1.5) {
       const p = t4.copy(mid).addScaledVector(dir, s);
       if (p.y < 0) { len = s; hit = 'ground'; break; }
       if (this.city.heightAt(p.x, p.z) > p.y) { len = s; hit = 'wall'; break; }
     }
-    const cb = this.chest(b, t2), tc = clamp(t1.copy(cb).sub(mid).dot(dir), 0, EYE.range);
-    if (!b.ko && tc < len && t3.copy(mid).addScaledVector(dir, tc).distanceTo(cb) < 1.6) { len = tc; hit = 'enemy'; }
-    const end = mid.clone().addScaledVector(dir, len);
-    a.beamTarget = end; this.eyeBeam = { owner: a, on: true, end, t: act.onT, hit };
+    const cb = this.chest(b, t2), tc = clamp(t1.copy(cb).sub(mid).dot(dir), 0, C.range);
+    const hitR = roar ? C.r0 + C.spread * tc + C.body : C.hitR;
+    if (!b.ko && tc < len && t3.copy(mid).addScaledVector(dir, tc).distanceTo(cb) < hitR) { len = tc; hit = 'enemy'; }
+    const end = mid.clone().addScaledVector(dir, len), imp = hit === 'enemy' ? cb.clone() : end;
+    a.beamTarget = end; this.eyeBeam = { owner: a, on: true, end, imp, dir, len, t: act.onT, hit, roar, sfx: act.sfx };
     if (a.state === 'fly') a.vel.addScaledVector(dir, -5 * dt); // recoil
     if (hit === 'enemy') {
       act.hitT += dt; const k = Math.min(1, act.hitT / 1.0), m = b.def.mass;
-      if (act.hitT <= dt * 1.01) { this.fx.flash(end, 0xfff0d0, 70, 0.3); this.burst(end, a, 50, 14); this.fx.shockwaveOriented?.(end, dir, 0xfff2c8, 8, 0.35, 0.7); }
-      act.dmgAcc += dt * EYE.dps; if (act.dmgAcc >= 3) { this.damage(b, act.dmgAcc, a, 'eyebeam', { charge: +k.toFixed(2) }); act.dmgAcc = 0; }
+      if (act.hitT <= dt * 1.01) { this.fx.flash(imp, roar ? 0xff7020 : 0xfff0d0, 70, 0.3); this.burst(imp, a, 50, 14); this.fx.shockwaveOriented?.(imp, dir, roar ? 0xff8a30 : 0xfff2c8, 8, 0.35, 0.7); }
+      act.dmgAcc += dt * C.dps; if (act.dmgAcc >= 3) { this.damage(b, act.dmgAcc, a, kind, { charge: +k.toFixed(2) }); act.dmgAcc = 0; }
       if (b.grabbedBy) { /* held by someone: no push */ }
       else if (!b.ragdoll) { if (b.grabbing) this.releaseGrab(b); // sustained push, then the victim is knocked into a tumble
         b.knockT = Math.max(b.knockT, 0.25); b.action = null;
@@ -511,33 +560,42 @@ export class Combat {
         b.vel.lerp(t1.copy(dir).multiplyScalar((30 + 50 * k) / m), Math.min(1, dt * 5));
         if (act.hitT > 0.4) { b.vel.copy(dir).multiplyScalar((45 + 70 * k) / m); this.startRagdoll(b, 7 + 6 * k); }
       } else b.vel.addScaledVector(dir, 110 * dt / m); // keep driving the tumbling body
-      for (let i = 0; i < 8; i++) this.fx.spark.emit(end, t1.set((Math.random() - .5) * 18, (Math.random() - .3) * 18, (Math.random() - .5) * 18), 0.2 + Math.random() * 0.25, this.cGold0, this.cGold1);
-      if (isP) this.shakeNear(end, 0.04);
-    } else if (hit) { // scorching the wall / ground: sparks, heat shimmer, scorch marks
+      if (roar) for (let i = 0; i < 14; i++) this.fx.fire.emit(t3.copy(imp).addScaledVector(dir, -0.6), t1.set((Math.random() - .5) * 24, (Math.random() - .2) * 18, (Math.random() - .5) * 24).addScaledVector(dir, -6), 0.25 + Math.random() * 0.3, this.cFire0, this.cFire1);
+      else for (let i = 0; i < 8; i++) this.fx.spark.emit(imp, t1.set((Math.random() - .5) * 18, (Math.random() - .3) * 18, (Math.random() - .5) * 18), 0.2 + Math.random() * 0.25, this.cGold0, this.cGold1);
+      if (isP) this.shakeNear(imp, 0.04);
+    } else if (hit) { // scorching the wall / ground: sparks or fire splash, heat shimmer, scorch marks
       const n = hit === 'ground' ? V(0, 1, 0) : (this.wallHit(end.clone().addScaledVector(dir, 0.6), 0.1)?.normal || dir.clone().negate());
-      for (let i = 0; i < 6; i++) this.fx.spark.emit(end, t1.copy(n).multiplyScalar(4 + Math.random() * 12).add(t3.set((Math.random() - .5) * 12, Math.random() * 8, (Math.random() - .5) * 12)), 0.2 + Math.random() * 0.3, this.cGold0, this.cGold1);
+      if (roar) { // fire splashes out along the surface
+        const sp = t4.copy(dir).addScaledVector(n, -dir.dot(n)); if (sp.lengthSq() < 1e-4) sp.set(1, 0, 0); sp.normalize();
+        for (let i = 0; i < 20; i++) this.fx.fire.emit(t3.copy(end).addScaledVector(n, 0.4), t1.copy(n).multiplyScalar(3 + Math.random() * 8).addScaledVector(sp, 10 + Math.random() * 20).add(t2.set((Math.random() - .5) * 22, (Math.random() - .5) * 6, (Math.random() - .5) * 22)), 0.3 + Math.random() * 0.35, this.cFire0, this.cFire1);
+      } else for (let i = 0; i < 6; i++) this.fx.spark.emit(end, t1.copy(n).multiplyScalar(4 + Math.random() * 12).add(t3.set((Math.random() - .5) * 12, Math.random() * 8, (Math.random() - .5) * 12)), 0.2 + Math.random() * 0.3, this.cGold0, this.cGold1);
       for (let i = 0; i < 2; i++) this.fx.dust.emit(t3.copy(end).addScaledVector(n, 0.4), t1.set((Math.random() - .5) * 1.5, 2 + Math.random() * 2.5, (Math.random() - .5) * 1.5), 0.6 + Math.random() * 0.5, this.cHeat0 || (this.cHeat0 = new THREE.Color(1.1, 1.05, 0.95)), this.cHeat1 || (this.cHeat1 = new THREE.Color(0.5, 0.48, 0.45)));
-      if ((act.scorchT = (act.scorchT || 0) - dt) <= 0) { act.scorchT = 0.22; this.fx.impact(end, n, 0.3, true); }
+      if ((act.scorchT = (act.scorchT || 0) - dt) <= 0) { act.scorchT = 0.22; this.fx.impact(end, n, roar ? 0.55 : 0.3, true); }
     }
-    if (this.fx.lightT <= 0.05) { this.fx.light.position.copy(end); this.fx.light.color.setHex(0xfff0c8); this.fx.light.intensity = 260; this.fx.lightT = 0.06; this.fx.lightDur = 0.06; }
-    const release = (isP ? !(inp && inp.blast) : true) && act.onT >= EYE.min;
-    if (release || act.onT >= EYE.max) this.endEyeBeam(a, b, act, dir, end);
+    if (this.fx.lightT <= 0.05) { this.fx.light.position.copy(roar ? mid.clone().lerp(end, 0.3) : end); this.fx.light.color.setHex(roar ? 0xff6a20 : 0xfff0c8); this.fx.light.intensity = roar ? 420 : 260; this.fx.lightT = 0.06; this.fx.lightDur = 0.06; }
+    const release = (isP ? !(inp && inp.blast) : true) && act.onT >= C.min;
+    if (release || act.onT >= C.max) this.endEyeBeam(a, b, act, dir, imp);
   }
   endEyeBeam(a, b, act, dir, end) {
-    if (act.hitT > 0 && !b.ko && !b.grabbedBy) { // light explosion on the victim: final shove scaled by how long the beam held them
+    const roar = a.def.style === 'fire', kind = roar ? 'roar' : 'eyebeam';
+    if (act.hitT > 0 && !b.ko && !b.grabbedBy) { // explosion on the victim: final shove scaled by how long the beam held them
       const k = Math.min(1, act.hitT / 1.0), m = b.def.mass;
-      this.damage(b, 6 + 10 * k, a, 'eyebeam', { charge: +k.toFixed(2), final: true });
+      this.damage(b, 6 + 10 * k, a, kind, { charge: +k.toFixed(2), final: true });
       if (!b.ko) { if (b.ragdoll) b.vel.addScaledVector(dir, (30 + 90 * k) / m); else { b.vel.copy(dir).multiplyScalar((50 + 110 * k) / m); this.startRagdoll(b, 8 + 6 * k); } }
-      this.fx.flash(end, 0xfff0d0, 90 + 80 * k, 0.4); this.burst(end, a, 60 + 60 * k, 16 + 10 * k);
-      this.fx.shockwaveOriented?.(end, dir, 0xfff2c8, 10 + 25 * k, 0.5, 0.8); this.shakeNear(end, 0.35 + 0.4 * k);
+      this.fx.flash(end, roar ? 0xff6a20 : 0xfff0d0, 90 + 80 * k, 0.4); this.burst(end, a, 60 + 60 * k, 16 + 10 * k);
+      if (roar) { a.fireBurst(end, 120 + 120 * k, 22 + 14 * k); this.fx.shockwave(end, 0xff7020, 10 + 20 * k); fireBlastSound(k); }
+      this.fx.shockwaveOriented?.(end, dir, roar ? 0xff8a30 : 0xfff2c8, 10 + 25 * k, 0.5, 0.8); this.shakeNear(end, 0.35 + 0.4 * k);
     }
+    act.sfx?.stop();
     a.action = null; a.cd.blast = 0.8; a.eyeGlow = 0; a.beamTarget = null;
   }
   updateEyeBeam(dt) {
     const eb = this.eyeBeam, on = eb && eb.on && eb.owner.action?.beam;
-    if (eb && !eb.owner.action?.beam) { eb.owner.eyeGlow = 0; eb.owner.beamTarget = null; this.eyeBeam = null; }
-    for (const m of this.eyeMeshes) m.c.visible = m.w.visible = !!on;
+    if (eb && !eb.owner.action?.beam) { eb.owner.eyeGlow = 0; eb.owner.beamTarget = null; eb.sfx?.stop(); this.eyeBeam = null; }
+    for (const m of this.eyeMeshes) m.c.visible = m.w.visible = !!on && !eb.roar;
+    for (const m of this.roarCones) m.visible = !!on && eb.roar;
     if (!on) return;
+    if (eb.roar) return this.updateRoarCone(eb);
     const eyes = eb.owner.eyePositions?.(this._eyes) || [this.eyeMid(eb.owner, this._eyes[0]), this._eyes[0].clone()];
     const fl = 0.85 + 0.15 * Math.sin(this.t * 60) + 0.1 * Math.random(), grow = Math.min(1, eb.t / 0.06);
     for (let i = 0; i < 2; i++) {
@@ -546,6 +604,26 @@ export class Combat {
     }
     this.eyeGlowM.opacity = 0.45 * fl;
     if (Math.random() < 0.8) this.fx.spark.emit(t2.copy(eyes[0]).lerp(eb.end, Math.random()), t3.set((Math.random() - .5) * 3, (Math.random() - .5) * 3, (Math.random() - .5) * 3), 0.25, this.cGold0, this.cGold1);
+  }
+  // roar blast: shader cones from the mouth + roiling fire particles through the cone + heat shimmer above it
+  updateRoarCone(eb) {
+    const from = this.beamOrigin(eb.owner, t1.clone()), dir = eb.dir, grow = Math.min(1, eb.t / 0.12);
+    const len = Math.max(2, eb.len * grow + (eb.hit === 'enemy' ? 2.5 : 0.5)), r1 = (ROAR.r0 + ROAR.spread * len) * (0.6 + 0.4 * grow);
+    const look = t2.copy(from).add(dir);
+    this.roarCones.forEach((m, i) => {
+      m.position.copy(from); m.lookAt(look);
+      const u = m.material.uniforms; u.t.value = this.t + i * 3.7; u.len.value = len; u.r0.value = ROAR.r0 * (i ? 0.5 : 1); u.r1.value = r1 * (i ? 0.45 : 1); u.op.value = 0.85 + 0.15 * Math.random();
+    });
+    const up = Math.abs(dir.y) > 0.9 ? V(1, 0, 0) : V(0, 1, 0), sx = t3.crossVectors(dir, up).normalize(), sy = t4.crossVectors(sx, dir).normalize();
+    for (let i = 0; i < 60; i++) {
+      const s = Math.pow(Math.random(), 0.8) * len, r = (ROAR.r0 + ROAR.spread * s) * Math.sqrt(Math.random()) * 0.8, a = Math.random() * 6.283;
+      const p = V().copy(from).addScaledVector(dir, s).addScaledVector(sx, Math.cos(a) * r).addScaledVector(sy, Math.sin(a) * r);
+      this.fx.fire.emit(p, V().copy(dir).multiplyScalar(30 + Math.random() * 40).addScaledVector(sx, Math.cos(a) * 6).addScaledVector(sy, Math.sin(a) * 6), 0.12 + Math.random() * 0.2, this.cFire0, this.cFire1);
+    }
+    for (let i = 0; i < 6; i++) { // heat distortion: faint additive shimmer rising off the blast (no smoke)
+      const s = Math.random() * len, p = V().copy(from).addScaledVector(dir, s).addScaledVector(sy, (ROAR.r0 + ROAR.spread * s) * (0.6 + 0.5 * Math.random()));
+      this.fx.fire.emit(p, V((Math.random() - .5) * 2, 3 + Math.random() * 4, (Math.random() - .5) * 2), 0.5 + Math.random() * 0.5, this.cHaze0 || (this.cHaze0 = new THREE.Color(0.32, 0.16, 0.06)), this.cHaze1 || (this.cHaze1 = new THREE.Color(0.06, 0.04, 0.03)));
+    }
   }
   // ---------- ranged ----------
   fireBlast(a, b) {
@@ -737,7 +815,7 @@ export class Combat {
       const r = Math.random();
       if (d < 4.2 && ai.cd.punch <= 0) { this.start(ai, 'punch', dir); B.mode = 'circle'; }
       else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < 0.22) { this.start(ai, 'tackle', dir); }
-      else if (d > 6 && d < 120 && ai.cd.blast <= 0 && r < 0.6 && ai.def.style !== 'clean') { /* AI Centurion never fires the beam */ const jitter = dir.clone().add(V((Math.random() - .5) * 0.06, (Math.random() - .5) * 0.04, (Math.random() - .5) * 0.06)).normalize(); this.start(ai, 'blast', jitter); }
+      // (no ranged blast: Centurion's eye beam and Tiger's roar blast are player-only)
       else if (r > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
     }
     if (B.mode === 'rush' && d < 3.5 && ai.cd.punch <= 0 && this.canAct(ai)) { this.start(ai, 'punch', dir); B.mode = 'circle'; }

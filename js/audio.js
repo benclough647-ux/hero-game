@@ -40,3 +40,47 @@ export function whooshSound(fire) {
   noise(t, 0.22, 'highpass', 2500, 6000, 0.18, 0.02);
   if (fire) noise(t + 0.02, 0.3, 'lowpass', 1800, 400, 0.35, 0.02);
 }
+
+// Tiger roar blast: a deep growl (detuned saws + sub, fluttered by an LFO, driven through a waveshaper) layered with a
+// looping fire roar (band-passed noise + low rumble). Returns a handle; stop() fades it out when the blast ends.
+export function roarSound() {
+  unlockAudio(); if (!ctx || ctx.state !== 'running') return null;
+  const t = ctx.currentTime + 0.01, out = ctx.createGain();
+  out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(0.85, t + 0.1); out.connect(master);
+  const shaper = ctx.createWaveShaper(), curve = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curve[i] = Math.tanh(3 * x); } shaper.curve = curve;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 5; lp.frequency.setValueAtTime(380, t); lp.frequency.exponentialRampToValueAtTime(1100, t + 0.26);
+  const gG = ctx.createGain(); gG.gain.value = 0.5; shaper.connect(lp); lp.connect(gG); gG.connect(out);
+  const srcs = [];
+  const flutter = ctx.createOscillator(), fG = ctx.createGain(); flutter.frequency.value = 24; fG.gain.value = 7; flutter.connect(fG); srcs.push(flutter);
+  const wob = ctx.createOscillator(), wG = ctx.createGain(); wob.frequency.value = 5.5; wG.gain.value = 260; wob.connect(wG); wG.connect(lp.frequency); srcs.push(wob);
+  for (const [type, f, d] of [['sawtooth', 56, 0], ['sawtooth', 84, 9], ['square', 28, 0]]) {
+    const o = ctx.createOscillator(); o.type = type; o.detune.value = d;
+    o.frequency.setValueAtTime(f * 0.8, t); o.frequency.exponentialRampToValueAtTime(f * 1.15, t + 0.24); o.frequency.exponentialRampToValueAtTime(f, t + 1.2); // wind-up then the snap
+    fG.connect(o.frequency); o.connect(shaper); srcs.push(o);
+  }
+  const nz = ctx.createBufferSource(); nz.buffer = noiseBuf; nz.loop = true; srcs.push(nz);
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.6; bp.frequency.setValueAtTime(400, t); bp.frequency.exponentialRampToValueAtTime(1300, t + 0.3);
+  const rum = ctx.createBiquadFilter(); rum.type = 'lowpass'; rum.frequency.value = 220;
+  const nG = ctx.createGain(); nG.gain.setValueAtTime(0.0001, t); nG.gain.exponentialRampToValueAtTime(0.7, t + 0.28);
+  const rG = ctx.createGain(); rG.gain.value = 0.6;
+  nz.connect(bp); bp.connect(nG); nG.connect(out); nz.connect(rum); rum.connect(rG); rG.connect(out);
+  for (const s of srcs) s.start(t);
+  let stopped = false;
+  return { stop() {
+    if (stopped) return; stopped = true; const n = ctx.currentTime;
+    out.gain.cancelScheduledValues(n); out.gain.setValueAtTime(Math.max(0.0001, out.gain.value), n); out.gain.exponentialRampToValueAtTime(0.0001, n + 0.4);
+    for (const s of srcs) s.stop(n + 0.45);
+  } };
+}
+// fiery explosion when the roar blast is released
+export function fireBlastSound(power = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime + 0.01;
+  noise(t, 0.7, 'lowpass', 3000, 120, 0.6 + 0.3 * power, 0.004);
+  noise(t, 0.9, 'bandpass', 900, 300, 0.4, 0.02);
+  const o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine';
+  o.frequency.setValueAtTime(90, t); o.frequency.exponentialRampToValueAtTime(32, t + 0.7);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.7, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.9);
+}
