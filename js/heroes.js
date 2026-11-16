@@ -320,7 +320,8 @@ export async function preloadHeroModels(onProgress) {
 const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'tackle', 'fall', 'down']);
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
 const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch']);
-const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3();
+const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
+const _cq = new THREE.Quaternion(), _cp = new THREE.Quaternion(), _cd = new THREE.Quaternion(), _cv = new THREE.Vector3(), _cv2 = new THREE.Vector3(), _cf = new THREE.Vector3(), _cr = new THREE.Vector3(), _cu = new THREE.Vector3(), _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _c3 = new THREE.Vector3(), _c4 = new THREE.Vector3();
 // ---------- ragdoll joint layer ----------
 // Each driven bone gets a 3-DOF offset rotation (bone-local rotation vector) on top of the clip pose, integrated as a
 // damped pendulum: gravity, the body's linear/angular acceleration and spin (centrifugal) swing it, a weak spring pulls
@@ -380,7 +381,7 @@ export class Hero {
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
     // combat state
-    this.hp = 100; this.maxHp = 100; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0 };
+    this.hp = 100; this.maxHp = 100; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0, recover: 0 };
     this.ragdoll = null; this.grabbedBy = null; this.grabbing = null; this.ko = false; this.aim = V(0, 0, 1); this.shoulders = null;
     this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
     this.superSpeed = false; this.superT = 0; this.superIdle = 0; this.boomKick = 0; this.visibleFlag = true;
@@ -525,7 +526,11 @@ export class Hero {
         if (this.charge > 0 && has('crouch')) { const c = Math.min(1, this.charge * 2); tgt.idle *= 1 - c; tgt.run *= 1 - c; tgt.crouch = c; drive('crouch', 0.42); }
       } else if (this.state === 'air') tgt.air = 1;
       else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
-      if (act && has(act.type)) {
+      const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
+      if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
+      else if (this.grabbedBy && has('fall')) { over = 'fall'; overW = 0.35; }
+      else if (hold) { over = null; }
+      else if (act && has(act.type)) {
         over = act.type; overW = 1;
         if (act.type === 'punch') drive('punch', act.t * 1.6);       // fist lands ~0.16 s (game hit window)
         else if (act.type === 'blast') drive('blast', act.t);           // hand up by ~0.12 s, blast fires at 0.14 s
@@ -539,6 +544,7 @@ export class Hero {
     for (const n in acts) acts[n].setEffectiveWeight(sum > 0 ? A.w[n] / sum : (n === 'idle' ? 1 : 0));
     A.mixer.update(dt);
     if (A.rag) this.ragdollJoints(dt, A.rag);
+    this.chokePose(dt);
     // aim the striking arm at the target (pitch), compensating for whole-body lean
     if (!rd && act && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
       const k = A.w[act.type] / Math.max(sum, 1e-3);
@@ -558,7 +564,8 @@ export class Hero {
   }
   ragdollJoints(dt, R) {
     const rd = this.ragdoll, root = this.rig.root;
-    const target = rd ? (rd.getUp > 0 ? Math.pow(1 - Math.min(1, rd.getUp), 2) : 1) : 0;
+    const clothOnly = !rd && this.action?.type === 'tackle' && !!this.action.mode && this.action.mode !== 'drive';
+    const target = rd ? (rd.getUp > 0 ? Math.pow(1 - Math.min(1, rd.getUp), 2) : 1) : clothOnly ? 1 : 0;
     R.w += (target - R.w) * Math.min(1, dt * (rd ? 12 : 6));
     if (!rd && R.w < 0.01) { if (R.active) { for (const j of R.joints) { j.th.set(0, 0, 0); j.w.set(0, 0, 0); if (j.rest) j.bone.quaternion.copy(j.rest); } R.active = false; } return; }
     if (!R.active) { R.active = true; R.prevVel.copy(this.vel); R.prevW.set(0, 0, 0); for (const j of R.joints) { j.th.set(0, 0, 0); j.w.set(0, 0, 0); } }
@@ -573,7 +580,9 @@ export class Hero {
     const resting = rd && rd.rest > 0.1, floorY = rd?.floor ?? this.pos.y;
     R.hips.getWorldPosition(_rhip);
     const n = dt > 1 / 45 ? 2 : 1, sdt = dt / n;
+    const yawF = _rhip.clone(); yawF.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     for (const j of R.joints) {
+      if (clothOnly && !j.cloth) { if (j.th.lengthSq() > 0) { j.th.multiplyScalar(Math.exp(-dt * 8)); const a = j.th.length() * R.w; if (a > 1e-4) j.bone.quaternion.multiply(_rq.setFromAxisAngle(_rt.copy(j.th).normalize(), a)); } continue; }
       if (j.rest) j.bone.quaternion.copy(j.rest); // un-animated (cloth) bones: start from their bind pose
       j.bone.getWorldQuaternion(_rq); _rqi.copy(_rq).invert();
       const d = _rd.set(0, 1, 0).applyQuaternion(_rq);
@@ -583,6 +592,7 @@ export class Hero {
       const g = _rg.set(0, -32, 0).sub(acc);
       _rt.crossVectors(wB, r); g.sub(_rt.crossVectors(wB, _rt.clone())); g.sub(_rt.crossVectors(dW, r));
       if (j.cloth) g.addScaledVector(this.vel, -1.5).add(_rt.set(0, -10, 0)); // cloth also feels the air rushing past
+      if (j.cloth && clothOnly) g.addScaledVector(yawF, -38 - 14 * Math.sin(this.t * 5.3 + j.len * 9)).add(_rt.set(Math.sin(this.t * 3.1) * 8, 10 + 6 * Math.sin(this.t * 4.7 + j.th.x), 0)); // dramatic billow while holding
       const alphaW = _rt.crossVectors(d, g).multiplyScalar(1.5 / j.len);
       // limbs can't sink into the floor: push the tip back up and damp
       const tipY = _rp.y + d.y * j.len; let cdamp = 0;
@@ -601,6 +611,51 @@ export class Hero {
       const ang = j.th.length() * R.w;
       if (ang > 1e-5) j.bone.quaternion.multiply(_rq.setFromAxisAngle(_rt.copy(j.th).divideScalar(j.th.length()), ang));
     }
+  }
+  // ---- choke hold posing on the skinned rig (attacker: arm up gripping the throat, other fist cocked; victim: dangling, clawing) ----
+  aimBone(bone, dir, w = 1) {
+    if (!bone || w <= 0) return;
+    bone.getWorldQuaternion(_cq); const cur = _cv.set(0, 1, 0).applyQuaternion(_cq);
+    _cd.setFromUnitVectors(cur, _cv2.copy(dir).normalize()); if (w < 1) _cd.slerp(_qI, 1 - w);
+    _cq.premultiply(_cd); bone.parent.getWorldQuaternion(_cp); bone.quaternion.copy(_cp.invert().multiply(_cq)); bone.updateMatrixWorld(true);
+  }
+  chokePose(dt) {
+    const A = this.anim; if (!A) return;
+    const B = A.B, act = this.action, t = this.t;
+    const F = _cf.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)), Rt = _cr.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw)), U = _cu.set(0, 1, 0);
+    const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive' && this.grabbing;
+    this.holdW = THREE.MathUtils.clamp((this.holdW || 0) + (hold || (act && act.mode === 'punch' && act.strikeT !== undefined) ? dt * 7 : -dt * 5), 0, 1);
+    const att = this.holdW;
+    if (att > 0) {
+      this.rig.root.updateMatrixWorld(true);
+      const spin = act?.mode === 'spin';
+      // gripping arm (right): extended up and forward at the victim's throat
+      const grip = _c1.copy(F).multiplyScalar(spin ? 0.95 : 0.9).addScaledVector(U, spin ? 0.22 : 0.55).addScaledVector(Rt, 0.04);
+      this.aimBone(B('upper_arm.R'), grip, att); this.aimBone(B('forearm.R'), grip, att); this.aimBone(B('hand.R'), grip, att * 0.8);
+      // free arm (left): elbow back, fist cocked by the shoulder; charges further back; then the strike
+      const c = act?.charge || 0, s = act?.strikeT !== undefined ? Math.min(1, act.strikeT / 0.09) : 0;
+      const up = _c2.copy(F).multiplyScalar(-0.55 - 0.45 * c).addScaledVector(U, -0.55 + 0.15 * c).addScaledVector(Rt, -0.45);
+      const fo = _c3.copy(F).multiplyScalar(0.45).addScaledVector(U, 0.85).addScaledVector(Rt, 0.12);
+      if (s > 0) { const st = _c4.copy(F).addScaledVector(U, 0.3).addScaledVector(Rt, 0.18).normalize(); up.normalize().lerp(st, s); fo.normalize().lerp(st, s); }
+      this.aimBone(B('upper_arm.L'), up, att); this.aimBone(B('forearm.L'), fo, att);
+      const sp = B('spine'); if (sp && c > 0) sp.quaternion.multiply(_cd.setFromAxisAngle(_cv.set(0, 1, 0), -0.35 * c * (1 - s) + 0.25 * s)); // twist into the punch
+    }
+    // victim dangling by the throat
+    const g = this.grabbedBy, gm = g?.action?.mode, dangle = g && gm && gm !== 'drive';
+    this.dangleW = THREE.MathUtils.clamp((this.dangleW || 0) + (dangle ? dt * 7 : -dt * 6), 0, 1);
+    const w = this.dangleW; if (w <= 0) return;
+    this.rig.root.updateMatrixWorld(true);
+    const spinOut = gm === 'spin' ? Math.min(1.2, Math.abs(g.action.spinRate || 0) * 0.08) : 0;
+    const Fv = F, out = _c4.copy(Fv).multiplyScalar(-spinOut); // legs fly outward while being spun
+    const sw = Math.sin(t * 2.4) * 0.12, sw2 = Math.sin(t * 2.4 + 1.3) * 0.12, cl = Math.sin(t * 9) * 0.12;
+    for (const [side, k] of [['L', -1], ['R', 1]]) {
+      const so = _c1.copy(Rt).multiplyScalar(k); // outward on this side
+      this.aimBone(B('upper_arm.' + side), _c2.copy(Fv).multiplyScalar(0.6).addScaledVector(U, 0.45 + cl * k).addScaledVector(so, 0.35), w);
+      this.aimBone(B('forearm.' + side), _c2.copy(U).multiplyScalar(0.55).addScaledVector(Fv, 0.15).addScaledVector(so, -0.85), w); // hands claw at the arm under the chin
+      this.aimBone(B('thigh.' + side), _c2.set(0, -1, 0).addScaledVector(Fv, 0.1 + (k < 0 ? sw : sw2)).add(out).addScaledVector(so, 0.05), w);
+      this.aimBone(B('shin.' + side), _c2.set(0, -1, 0).addScaledVector(Fv, -0.08 + (k < 0 ? sw2 : sw) * 0.6).add(out), w);
+    }
+    this.aimBone(B('neck'), _c2.copy(U).addScaledVector(Fv, -0.35), w * 0.8); // head forced back
   }
   setQuality(preset) { this.qualityName = preset?.name || 'High'; this.applyLodLevels(); }
   applyLodLevels() {
@@ -624,6 +679,7 @@ export class Hero {
   update(dt, inp, cam, city) {
     const d = this.def, fire = d.style === 'fire'; this.t += dt;
     const stun = this.knockT > 0; if (stun) { this.knockT -= dt; inp = NO_INP; }
+    else if (this.grabbing) inp = NO_INP; // choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
     const fwd = cam.flatForward, right = cam.right;
     const wish = V().addScaledVector(fwd, inp.moveY).addScaledVector(right, inp.moveX);
     const prevYaw = this.yaw;
@@ -661,7 +717,12 @@ export class Hero {
 
     // combat movement overrides: tackle dash / carrying a grabbed enemy, punch lunge
     const act = this.action;
-    if (act && act.type === 'tackle' && !stun) {
+    const holding = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
+    if (holding && !stun) { // choke hold: hover in place (a little lift so the victim dangles clear of the ground)
+      if (this.state !== 'fly') this.state = 'fly';
+      this.vel.multiplyScalar(Math.exp(-dt * 7));
+      const fl = city.heightAt(this.pos.x, this.pos.z, 0.5); if (this.pos.y < fl + 1.0) this.vel.y = Math.max(this.vel.y, (fl + 1.0 - this.pos.y) * 4);
+    } else if (act && act.type === 'tackle' && !stun) {
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
       const spd = this.grabbing ? act.carrySpeed : d.tackleSpeed;
       const dir = this.grabbing ? act.carryDir : this.aim;
@@ -702,7 +763,9 @@ export class Hero {
 
     // facing
     const hs = Math.hypot(this.vel.x, this.vel.z);
-    if (act && act.type !== 'tackle' && Math.hypot(this.aim.x, this.aim.z) > 0.1) this.yaw = lerpAng(this.yaw, Math.atan2(this.aim.x, this.aim.z), Math.min(1, dt * 18));
+    if (holding && act.mode === 'spin') this.yaw += act.spinRate * dt;
+    else if (holding) this.yaw = lerpAng(this.yaw, cam.yawFacing, Math.min(1, dt * 6)); // aim the hold (and the throw / punch) with the camera
+    else if (act && act.type !== 'tackle' && Math.hypot(this.aim.x, this.aim.z) > 0.1) this.yaw = lerpAng(this.yaw, Math.atan2(this.aim.x, this.aim.z), Math.min(1, dt * 18));
     else if (this.state === 'fly') { if (this.vel.length() > 3) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * d.turn)); else this.yaw = lerpAng(this.yaw, cam.yawFacing, dt * 3); }
     else if (hs > 1) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * 10));
     const yawRate = (((this.yaw - prevYaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI) / Math.max(dt, 1e-4);
@@ -773,12 +836,20 @@ export class Hero {
       const runLean = this.useSkin ? 0 : run * 0.2; // the run clip already leans into the sprint
       const chargeLean = this.charge * 0.5;
       const act = this.action;
-      this.upright += ((act && act.type !== 'tackle' ? 1 : 0) - this.upright) * Math.min(1, dt * 10);
-      const tackleLean = act && act.type === 'tackle' ? (this.state === 'fly' ? 0.25 : 0.6) : 0;
+      const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive', grabbed = !!this.grabbedBy && this.grabbedBy.action?.mode && this.grabbedBy.action.mode !== 'drive';
+      this.upright += (((act && (act.type !== 'tackle' || hold)) || grabbed || this.flip ? 1 : 0) - this.upright) * Math.min(1, dt * 10);
+      const tackleLean = act && act.type === 'tackle' && !hold ? (this.state === 'fly' ? 0.25 : 0.6) : 0;
       r.body.rotation.x = fb * (flyPitch - climb * 0.7) * (1 - 0.75 * this.upright) + chargeLean + runLean + tackleLean;
       r.body.rotation.z = this.bank * (1 - this.upright);
+      if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       r.body.rotation.y = 0;
       r.body.position.y = this.hipH;
+      if (this.flip) { // recovery backflip: unwind the tumble, full backwards rotation, end upright
+        const f = this.flip; f.t += dt; const u = Math.min(1, f.t / f.dur), e = u * u * (3 - 2 * u);
+        _q1.copy(f.q0).slerp(_qI, Math.min(1, f.t / 0.16));
+        r.body.quaternion.copy(_q1).multiply(_q2.setFromAxisAngle(_ax.set(1, 0, 0), -Math.PI * 2 * e));
+        if (u >= 1) { this.flip = null; r.body.rotation.set(0, 0, 0); }
+      }
       if (this.useSkin) this.animateSkin(dt, hs, fb); else this.animateArms(dt, run, fb, r.body.rotation.x);
       if (fire) this.fireFx(dt, fly);
       this.animateMohawk();

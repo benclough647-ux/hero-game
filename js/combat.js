@@ -10,6 +10,8 @@ const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
 // punch dash: very fast lunge over a short distance, then the strike lands
+// choke grab (tackle connects): hold time, charged punch / spin throw / forward drive tuning
+export const CHOKE = { hold: 5, chargeT: 1.0, spinT: 0.85, spinTurns: 1.5, throwSpeed: 220, driveStick: 0.6 };
 export const DASH = { speed: 170, max: 34, free: 14, stop: 2.0, maxT: 0.32, assist: 32 };
 
 // screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
@@ -206,7 +208,13 @@ export class Combat {
   // ---------- per-frame ----------
   update(dt, player, enemy, inp, camFwd) {
     this.t += dt;
-    player.isPlayer = true; enemy.isPlayer = false;
+    player.isPlayer = true; enemy.isPlayer = false; this.player = player; this.pInp = inp; this.camFwd = camFwd;
+    // recovery backflip: double-tap jump while tumbling (player only, never the AI)
+    if (inp && inp.jumpPressed && player.ragdoll && !player.ko && !player.grabbedBy) {
+      const rd = player.ragdoll;
+      if (rd.getUp <= 0 && player.cd.recover <= 0 && this.t - (rd.lastTap ?? -9) < 0.3) this.recover(player);
+      else rd.lastTap = this.t;
+    }
     for (const h of [player, enemy]) {
       for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - dt);
       // the punch wind-up holds while the dash is still closing the gap, so the fist lands on arrival
@@ -240,6 +248,11 @@ export class Combat {
       if (!act.swung) { act.swung = true; this.burst(this.handPos(a, V()), a, 14, 6); }
       if (this.tryPunch(a, b)) { act.done = true; this.endDash(a, act); if (act.dash === null) a.vel.multiplyScalar(0.3); }
       else if (act.t > 0.34) act.done = true;
+    }
+    if (act.type === 'tackle' && act.mode && act.mode !== 'drive') {
+      if (a.grabbing) this.chokeStep(dt, a, a.grabbing); else if (act.mode === 'punch' && act.strikeT !== undefined) act.strikeT += dt;
+      if (act.t >= act.dur && !a.grabbing) a.action = null;
+      return;
     }
     if (act.type === 'tackle') {
       // homing: steer the drive toward a locked target in 3D
@@ -280,11 +293,17 @@ export class Combat {
     const act = a.action; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
     act.carrySpeed = Math.max(a.def.tackleSpeed * 1.25, a.vel.length() * 1.15);
     this.damage(b, 4 + 0.1 * rel, a, 'tackle', { speed: rel });
+    // the tackle ends in a one-handed choke hold: the attacker brakes hard and hangs the victim at arm's length
+    if (b.ko) { this.releaseGrab(a); return; }
+    act.mode = 'hold'; act.holdT = 0; b.endSuper?.(); a.endSuper?.(); b.ragdoll = null;
+    a.vel.multiplyScalar(0.25);
+    if (a !== this.player) { const B = this.ai; B.chokeT = 1 + Math.random() * 2; B.chokeOpt = ['punch', 'spin', 'drive'][Math.floor(Math.random() * 3)]; B.chokeCharge = 0.45 + Math.random() * 0.55; }
     this.shakeNear(a.pos, 0.3 + rel / 400); this.fx.flash(this.chest(b, t2), a.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 30, 0.2);
     this.burst(this.chest(b, V()), a, 30, 10);
   }
   carryStep(att, victim) {
     const act = att.action; if (!act) { this.releaseGrab(att); return; }
+    if (act.mode && act.mode !== 'drive') { this.holdStep(att, victim); return; }
     const dir = act.carryDir;
     const target = this.chest(att, t1).addScaledVector(dir, 1.7).setY(att.pos.y + 0.1);
     for (let s = 0.4; s <= 1.7; s += 0.3) { // march from the attacker: stop the victim at the first building face
@@ -299,6 +318,124 @@ export class Combat {
       victim.pos.addScaledVector(w.normal, 0.05);
       this.smash(att, victim, w.normal, w.point.setY(victim.pos.y + 1.2), Math.max(into, act.carrySpeed * 0.75));
     }
+  }
+  // victim hangs from the attacker's gripping fist by the neck
+  holdStep(att, victim) {
+    const fist = this.handPos(att, t1);
+    const F = t2.set(Math.sin(att.yaw), 0, Math.cos(att.yaw));
+    let neck = null;
+    const nb = victim.anim?.B?.('neck');
+    if (nb && victim.rig.root.visible !== undefined) { victim.rig.root.updateMatrixWorld(true); neck = nb.getWorldPosition(t3).sub(victim.pos); if (neck.y < 0.5 || neck.length() > 3) neck = null; }
+    if (!neck) neck = t3.set(0, 1.5 * victim.def.height / 1.83, 0);
+    victim.pos.copy(fist).sub(neck).addScaledVector(F, 0.16);
+    victim.vel.copy(att.vel); victim.yaw = att.yaw + Math.PI; victim.state = 'air'; victim.knockT = 0;
+  }
+  // ---- choke hold options (player: X charged punch / B spin throw / LS forward drive; AI picks after 1-3 s) ----
+  chokeStep(dt, a, b) {
+    const act = a.action, isP = a === this.player, inp = isP ? this.pInp : null, B = this.ai;
+    act.holdT += dt;
+    const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    if (act.mode === 'hold') {
+      let pick = null;
+      if (isP && inp) { if (inp.punchPressed) pick = 'punch'; else if (inp.cancelPressed) pick = 'spin'; else if (inp.moveY > CHOKE.driveStick) pick = 'drive'; }
+      else if (!isP && act.holdT > B.chokeT) pick = B.chokeOpt;
+      if (pick === 'punch') { act.mode = 'punch'; act.charge = 0; }
+      else if (pick === 'spin') { act.mode = 'spin'; act.spinT = 0; act.spinRate = 0; }
+      else if (pick === 'drive') {
+        // rocket forward carrying the victim: the existing carry / building-smash system takes over
+        const dir = isP ? this.camFwd.clone() : this.aiDriveDir(a);
+        if (dir.y < -0.3) dir.y = -0.3; dir.normalize();
+        act.mode = 'drive'; act.carryDir = dir; a.aim.copy(dir); act.carrySpeed = a.def.tackleSpeed * 1.25; act.grabT = 0;
+        a.vel.copy(dir).multiplyScalar(act.carrySpeed * 0.6);
+        this.fx.shockwaveOriented?.(this.chest(a, V()).addScaledVector(dir, -0.6), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 14, 0.45, 0.7);
+        if (a.def.style === 'fire') a.fireBurst(a.pos, 60, 16); else this.burst(this.chest(a, V()), a, 30, 10);
+        whooshSound(a.def.style === 'fire'); this.shakeNear(a.pos, 0.3);
+        return;
+      }
+      if (!pick && act.holdT >= CHOKE.hold) { this.breakFree(a, b); return; }
+      return;
+    }
+    if (act.mode === 'punch') {
+      const fire = a.def.style === 'fire';
+      if (act.strikeT === undefined) {
+        act.charge = Math.min(1, act.charge + dt / CHOKE.chargeT);
+        const hand = this.fistL(a, t1);
+        for (let i = 0; i < 4 + act.charge * 14; i++) (fire ? this.fx.fire : this.fx.spark).emit(hand, t4.set((Math.random() - .5) * 3, (fire ? 2 : 0) + (Math.random() - .5) * 3, (Math.random() - .5) * 3).multiplyScalar(0.5 + act.charge), 0.15 + Math.random() * 0.2, fire ? this.cFire0 : this.cGold0, fire ? this.cFire1 : this.cGold1);
+        if (this.fx.lightT <= 0.05) { this.fx.light.position.copy(hand); this.fx.light.color.setHex(fire ? 0xff6a20 : 0xfff0c0); this.fx.light.intensity = 80 + 500 * act.charge; this.fx.lightT = 0.06; this.fx.lightDur = 0.06; }
+        const release = isP ? (!inp || !inp.punch || act.charge >= 1) : act.charge >= B.chokeCharge;
+        if (release) act.strikeT = 0;
+        return;
+      }
+      act.strikeT += dt;
+      if (!act.struck && act.strikeT >= 0.08) { // the fist lands: huge knockback into a ragdoll
+        act.struck = true; const c = act.charge;
+        const dir = (isP ? this.camFwd.clone().setY(Math.max(-0.2, this.camFwd.y)) : F.clone()).normalize(); dir.y += 0.15; dir.normalize();
+        const hp = this.chest(b, V());
+        this.releaseGrab(a); act.t = act.dur - 0.3; // keep the follow-through pose briefly
+        this.damage(b, 12 + 33 * c, a, 'chargedPunch', { charge: +c.toFixed(2) });
+        b.vel.copy(dir).multiplyScalar((80 + 180 * c) / b.def.mass); this.startRagdoll(b, 14);
+        this.fx.shockwaveOriented?.(hp, dir, fire ? 0xff8a30 : 0xfff2c8, 18 + 45 * c, 0.6, 0.85);
+        this.fx.shockwave(hp.clone().setY(Math.max(0, hp.y - 1)), fire ? 0xff7020 : 0xe8e2d0, 15 + 30 * c);
+        this.fx.flash(hp, fire ? 0xff7020 : 0xfff0c0, 80 + 120 * c, 0.4);
+        this.burst(hp, a, 80 + 120 * c, 20 + 20 * c); this.shakeNear(hp, 0.6 + 0.6 * c);
+        if (fire) for (let i = 0; i < 80 * c; i++) this.fx.fire.emit(hp, t4.copy(dir).multiplyScalar(20 + Math.random() * 60).add(t1.set((Math.random() - .5) * 20, (Math.random() - .5) * 20, (Math.random() - .5) * 20)), 0.3 + Math.random() * 0.4, this.cFire0, this.cFire1);
+        if (isP) a.fovKick = (a.fovKick || 0) + 6 + 10 * c;
+      }
+      return;
+    }
+    if (act.mode === 'spin') {
+      act.spinT += dt; const u = act.spinT / CHOKE.spinT;
+      const total = Math.PI * 2 * CHOKE.spinTurns; // angular speed ramps up then holds (integrated in Hero.update)
+      act.spinRate = total / CHOKE.spinT * 1.6 * Math.min(1, u * 2.2);
+      if (Math.random() < 0.6) this.burst(this.chest(b, V()), a, 3, 4);
+      if (u >= 1) { // let go: hurl them along the camera / aim direction
+        const dir = (isP ? this.camFwd.clone() : this.aiDriveDir(a)); if (dir.y < -0.25) dir.y = -0.25; dir.y += 0.06; dir.normalize();
+        if (isP) a.yaw = Math.atan2(dir.x, dir.z);
+        this.releaseGrab(a); act.t = act.dur - 0.2; act.spinRate = 0;
+        this.damage(b, 8, a, 'spinThrow', { speed: CHOKE.throwSpeed });
+        b.vel.copy(dir).multiplyScalar(CHOKE.throwSpeed / b.def.mass); this.startRagdoll(b, 12);
+        const hp = this.chest(b, V());
+        this.fx.shockwaveOriented?.(hp, dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 22, 0.5, 0.75); this.burst(hp, a, 50, 14); this.shakeNear(hp, 0.45);
+        whooshSound(a.def.style === 'fire');
+      }
+    }
+  }
+  breakFree(a, b) {
+    const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    this.releaseGrab(a); a.action = null;
+    b.vel.copy(F).multiplyScalar(12); b.vel.y = 4; b.state = 'air'; b.knockT = 0.6; a.knockT = 0.45; a.vel.addScaledVector(F, -6);
+    this.fx.flash(this.chest(b, V()), 0xffffff, 25, 0.2); this.hud?.say(b === this.player ? 'You broke free!' : `${b.def.name} broke free!`);
+    this.stats.hits.push({ t: this.t, kind: 'breakFree', amount: 0, target: b.key, attacker: a.key });
+  }
+  fistL(h, out) { const f = h.fists?.[1]; if (f) { h.rig.root.updateMatrixWorld(true); return f.getWorldPosition(out); } return this.chest(h, out); }
+  // AI: drive / throw toward the nearest building face if there is one in reach, else straight ahead
+  aiDriveDir(a) {
+    let best = null;
+    for (let k = 0; k < 12; k++) { const ang = a.yaw + k / 12 * Math.PI * 2, d = V(Math.sin(ang), 0, Math.cos(ang));
+      for (let s = 6; s < 140; s += 3) { const p = t1.copy(a.pos).addScaledVector(d, s); if (this.city.heightAt(p.x, p.z) > a.pos.y + 1) { if (!best || s < best.s) best = { s, d }; break; } } }
+    return best ? best.d : V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+  }
+  // ---- recovery backflip (player only): double-tap A while tumbling ----
+  recover(h) {
+    const rd = h.ragdoll; if (!rd) return false;
+    const q0 = rd.q.clone(); h.ragdoll = null; h.knockT = 0;
+    h.vel.multiplyScalar(0.12); h.vel.y = Math.max(h.vel.y, 7);
+    const fl = this.city.heightAt(h.pos.x, h.pos.z, 0.5); if (h.pos.y < fl + 0.6) h.pos.y = fl + 0.6;
+    h.state = 'fly'; h.flip = { t: 0, dur: 0.55, q0 }; h.cd.recover = 1.4;
+    const c = this.chest(h, V()), fire = h.def.style === 'fire';
+    this.fx.shockwaveOriented?.(c, V(0, 1, 0), fire ? 0xff8a30 : 0xfff2d0, 9, 0.4, 0.75);
+    this.fx.flash(c, fire ? 0xff7020 : 0xfff0c0, 45, 0.25);
+    if (fire) h.fireBurst(h.pos, 70, 14); else this.burst(c, h, 40, 9);
+    whooshSound(fire);
+    this.stats.hits.push({ t: this.t, kind: 'recover', amount: 0, target: h.key });
+    return true;
+  }
+  // HUD state for the grab timer / prompts
+  grabState(player, enemy) {
+    for (const [a, role] of [[player, 'attacker'], [enemy, 'victim']]) {
+      const act = a.action; if (act?.type === 'tackle' && act.mode && act.mode !== 'drive' && a.grabbing) return { role, mode: act.mode, left: Math.max(0, CHOKE.hold - act.holdT), max: CHOKE.hold, charge: act.charge || 0 };
+    }
+    return null;
   }
   tryPunch(a, b) {
     const ca = this.chest(a, t1), cb = this.chest(b, t2), to = t3.copy(cb).sub(ca); const d = to.length();
@@ -472,6 +609,7 @@ export class Combat {
   aiInput(dt, ai, player) {
     const B = this.ai; B.t += dt;
     const inp = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
+    if (ai.grabbing) { this.aiCam.yawFacing = ai.yaw; return inp; } // holding someone: the choke logic decides
     if (ai.ko || ai.ragdoll || ai.grabbedBy || this.aiOff) return inp;
     const me = this.chest(ai, V()), tgt = this.chest(player, V());
     const to = tgt.clone().sub(me); const d = to.length(); const dir = to.clone().divideScalar(d || 1);
