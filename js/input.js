@@ -35,6 +35,7 @@ export class Input {
       tackle: k('KeyR') || bv(6) > 0.5 || (this.mouseBtn.has(2) && !!document.pointerLockElement),
       punch: k('KeyX') || k('KeyV') || b(2),
       super: k('KeyB') || b(10), // LS click: sonic boom / super speed while flying
+      lock: k('KeyT') || b(11) || this.mouseBtn.has(1), // RS click / T / middle mouse: lock on
       cancel: k('KeyE') || b(1),
       switch: k('Tab') || k('KeyQ') || b(3),
       any: b(0) || b(9),
@@ -43,7 +44,7 @@ export class Input {
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }

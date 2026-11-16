@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { whooshSound } from './audio.js';
 // Combat: player vs computer-controlled rival (Tiger <-> Centurion), ranged blasts (fire / light ray),
 // tackle-grab that can smash the target into buildings, super punch with ragdoll, momentum-based damage,
 // procedural ragdoll with building/ground collisions, KO + respawn, and the AI opponent.
@@ -6,6 +7,24 @@ const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const GRAV = 32, CHEST = 1.15;
 const t1 = V(), t2 = V(), t3 = V(), t4 = V();
 const clamp = THREE.MathUtils.clamp;
+// lock-on: range to acquire, distance / KO time that breaks it
+export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
+// punch dash: very fast lunge over a short distance, then the strike lands
+export const DASH = { speed: 170, max: 34, free: 14, stop: 2.0, maxT: 0.32, assist: 32 };
+
+// screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
+function makeReticle() {
+  const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 0.45, 0.25), transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const g = new THREE.Group(), spin = new THREE.Group(), chev = new THREE.Group();
+  for (let i = 0; i < 4; i++) spin.add(new THREE.Mesh(new THREE.RingGeometry(0.88, 1.0, 24, 1, i * Math.PI / 2 + 0.22, Math.PI / 2 - 0.44), mat));
+  const tri = new THREE.Shape(); tri.moveTo(0, 0.55); tri.lineTo(-0.16, 0.8); tri.lineTo(0.16, 0.8); tri.closePath();
+  const tg = new THREE.ShapeGeometry(tri);
+  for (let i = 0; i < 4; i++) { const m = new THREE.Mesh(tg, mat); m.rotation.z = i * Math.PI / 2; chev.add(m); }
+  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.07, 16), mat);
+  g.add(spin, chev, dot); g.userData = { spin, chev, mat };
+  g.traverse(o => { o.renderOrder = 999; o.frustumCulled = false; });
+  g.visible = false; return g;
+}
 
 // cooldowns (s) / durations
 const MOVES = {
@@ -32,7 +51,37 @@ export class Combat {
     scene.add(this.beamCore, this.beamGlow); this.beam = null;
     this.cFire0 = new THREE.Color(6, 3.4, 0.9); this.cFire1 = new THREE.Color(3, 0.35, 0.04);
     this.cGold0 = new THREE.Color(7, 6, 3.5); this.cGold1 = new THREE.Color(2.5, 1.6, 0.4);
+    this.lockOn = false; this.lockLostT = 0; this.lockPop = 0; this.reticle = makeReticle(); scene.add(this.reticle);
   }
+
+  // ---------- lock-on ----------
+  setLock(v) { this.lockOn = v; this.lockLostT = 0; this.lockPop = v ? 1 : 0; }
+  updateLock(dt, P, E, inp) {
+    if (inp && inp.lockPressed) {
+      if (this.lockOn) { this.setLock(false); this.hud?.say('Lock off'); }
+      else if (!E.ko && P.pos.distanceTo(E.pos) < LOCK.range) { this.setLock(true); this.hud?.say(`Locked on: ${E.def.name}`); }
+      else this.hud?.say('No target in range');
+    }
+    if (this.lockOn) {
+      const far = P.pos.distanceTo(E.pos) > LOCK.lose;
+      if (far || E.ko) this.lockLostT += dt; else this.lockLostT = 0;
+      if (this.lockLostT > (E.ko ? LOCK.koT : LOCK.loseT)) { this.setLock(false); this.hud?.say(E.ko ? 'Target down – lock off' : 'Target out of range – lock off'); }
+    }
+    this.updateReticle(dt, E);
+  }
+  updateReticle(dt, E) {
+    const r = this.reticle, cam = this.cam.cam;
+    r.visible = this.lockOn && E.visibleFlag !== false;
+    if (!r.visible) return;
+    this.lockPop = Math.max(0, this.lockPop - dt * 4);
+    this.chest(E, r.position); r.quaternion.copy(cam.quaternion);
+    const d = r.position.distanceTo(cam.position);
+    const k = d * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2) * 0.12 * (1 + 1.6 * this.lockPop * this.lockPop);
+    r.scale.setScalar(Math.max(k, 0.9));
+    const u = r.userData; u.spin.rotation.z += dt * 1.6; u.chev.scale.setScalar(1 + 0.08 * Math.sin(this.t * 7));
+    u.mat.opacity = (this.lockLostT > 0 ? 0.45 + 0.4 * Math.abs(Math.sin(this.t * 12)) : 0.95);
+  }
+  lockTarget(E) { return this.lockOn && !E.ko ? E : null; }
 
   // ---------- helpers ----------
   chest(h, out) { return out.copy(h.pos).setY(h.pos.y + CHEST * h.def.height / 1.83); }
@@ -45,13 +94,49 @@ export class Combat {
     to.divideScalar(d);
     return to.dot(fallback) > cone || d < 5 ? to.clone() : fallback.clone().normalize();
   }
-  start(h, type, aim) {
+  // target: hero to track during the move (lock-on / aim assist), or null
+  start(h, type, aim, target = null) {
     if (!this.canAct(h) || h.cd[type] > 0) return false;
-    h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false };
+    h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
     h.cd[type] = MOVES[type].cd;
-    if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.def.tackleSpeed * 1.25; if (h.def.style === 'fire') h.fireBurst(h.pos, 50, 14); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 12); }
-    if (type === 'punch') h.vel.addScaledVector(h.aim, 10);
+    if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.def.tackleSpeed * 1.25;
+      h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.def.tackleSpeed * 0.6)); // explosive launch
+      if (h.def.style === 'fire') h.fireBurst(h.pos, 70, 20); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 18); this.shakeNear(h.pos, 0.25); }
+    if (type === 'punch') this.startDash(h, target);
     return true;
+  }
+  // punch lunge: dash at very high speed toward the target (stop just short of it) or a short way forward
+  startDash(h, target) {
+    let dist = DASH.free;
+    if (target) { const to = this.chest(target, t1).sub(this.chest(h, t2)); const d = to.length(); h.aim.copy(to.divideScalar(d || 1)); dist = clamp(d - DASH.stop, 0, DASH.max); }
+    else if (h.state === 'ground') { h.aim.y = 0; if (h.aim.lengthSq() < 1e-4) h.aim.set(Math.sin(h.yaw), 0, Math.cos(h.yaw)); h.aim.normalize(); }
+    if (dist < 0.8) { h.vel.addScaledVector(h.aim, 10); return; } // already in reach: plain punch
+    const act = h.action;
+    act.dash = { left: dist, t: 0, speed: DASH.speed, cap: DASH.speed, used: 0, skip: true, pre: Math.max(0, h.vel.dot(h.aim)) }; act.dashed = true; act.dashPre = act.dash.pre;
+    const fire = h.def.style === 'fire', c = this.chest(h, V());
+    this.fx.shockwaveOriented?.(c.clone().addScaledVector(h.aim, -0.5), h.aim, fire ? 0xff8a30 : 0xe8f0ff, 7, 0.35, 0.7);
+    this.burst(c.clone().addScaledVector(h.aim, 1.2), h, 10, 6);
+    if (h.isPlayer) { h.fovKick = (h.fovKick || 0) + 9; this.cam.shake(0.18); }
+    whooshSound(fire);
+  }
+  // per frame while dashing: re-aim at the target, trail effect, end on arrival / distance / wall
+  dashStep(dt, a, act) {
+    const ds = act.dash; ds.t += dt;
+    const tgt = act.target && !act.target.ko ? act.target : null;
+    if (ds.skip) ds.skip = false; else ds.left -= a.vel.length() * dt; // (the start frame hasn't moved yet)
+    if (tgt) { // home in; the last step is capped so we arrive exactly at striking distance
+      const to = this.chest(tgt, t1).sub(this.chest(a, t2)); const d = to.length(); if (d > 1e-3) a.aim.copy(to.divideScalar(d));
+      if (d < DASH.stop + 0.3) ds.left = 0; else ds.cap = (d - DASH.stop) / dt;
+    } else ds.cap = Math.max(0, ds.left) / dt;
+    const fire = a.def.style === 'fire', P = fire ? this.fx.fire : this.fx.spark, c0 = fire ? this.cFire0 : this.cGold0, c1 = fire ? this.cFire1 : this.cGold1;
+    const c = this.chest(a, t3);
+    for (let i = 0; i < 6; i++) P.emit(t4.copy(c).addScaledVector(a.aim, -0.3 - 0.7 * Math.random()).add(t2.set((Math.random() - .5) * 0.6, (Math.random() - .5) * 0.9, (Math.random() - .5) * 0.6)), t1.copy(a.aim).multiplyScalar(-4 - Math.random() * 6), 0.1 + Math.random() * 0.12, c0, c1);
+    const blocked = ds.used > 10 && a.vel.length() < ds.used * 0.4; // hit a wall / the ground
+    if (ds.left <= 0 || ds.t > DASH.maxT || blocked) this.endDash(a, act);
+  }
+  endDash(a, act) {
+    if (!act.dash) return; act.dash = null;
+    const keep = a.state === 'ground' ? 8 : 18; const v = a.vel.length(); if (v > keep) a.vel.multiplyScalar(keep / v);
   }
 
   damage(target, amount, attacker, kind, extra = {}) {
@@ -92,12 +177,16 @@ export class Combat {
   releaseGrab(att) { const v = att.grabbing; if (v) v.grabbedBy = null; att.grabbing = null; if (att.action?.type === 'tackle') att.action.t = att.action.dur; }
   smash(att, victim, normal, hitPoint, speed) {
     const dmg = this.damage(victim, 6 + 0.36 * speed, att, 'building', { speed });
-    this.fx.impact(hitPoint, normal, clamp(speed / 100, 0.4, 1.3), false);
-    this.fx.shockwave(hitPoint.clone().setY(Math.max(0, hitPoint.y - 1)), 0xd8d0c0, 8 + speed * 0.15);
-    this.shakeNear(hitPoint, 0.35 + speed / 140);
+    const pw = clamp(speed / 100, 0.4, 3);
+    this.fx.impact(hitPoint, normal, pw, false);
+    if (pw > 1.3) { this.fx.impact(hitPoint.clone().add(t4.set(0, 2.5, 0)), normal, pw * 0.6, false); this.fx.dustBurst(hitPoint.clone().setY(Math.max(0, hitPoint.y - 2)), 60 + speed * 0.3, 20 + speed * 0.1); }
+    this.fx.shockwave(hitPoint.clone().setY(Math.max(0, hitPoint.y - 1)), 0xd8d0c0, Math.min(80, 8 + speed * 0.22));
+    this.fx.shockwaveOriented?.(hitPoint.clone().addScaledVector(normal, 0.3), normal, 0xfff0d8, Math.min(60, 6 + speed * 0.15), 0.6, 0.7);
+    this.shakeNear(hitPoint, 0.35 + speed / 110);
     this.releaseGrab(att);
-    victim.vel.copy(normal).multiplyScalar(6 + speed * 0.08); victim.vel.y = 5;
-    this.startRagdoll(victim, 9);
+    // rebound off the wall carries real momentum now (bounces down the street / into the next block)
+    victim.vel.copy(normal).multiplyScalar(8 + speed * 0.2); victim.vel.y = 5 + speed * 0.04;
+    this.startRagdoll(victim, 12);
     att.vel.copy(normal).multiplyScalar(14); att.vel.y = 6; att.action = null; att.knockT = 0.25;
     return dmg;
   }
@@ -114,16 +203,22 @@ export class Combat {
   // ---------- per-frame ----------
   update(dt, player, enemy, inp, camFwd) {
     this.t += dt;
+    player.isPlayer = true; enemy.isPlayer = false;
     for (const h of [player, enemy]) {
       for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - dt);
-      if (h.action) { h.action.t += dt; }
+      // the punch wind-up holds while the dash is still closing the gap, so the fist lands on arrival
+      if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += dt; }
     }
-    // player commands
+    // player commands (locked on: always aim at / track the enemy)
     if (inp && !player.ko) {
-      const fwd = camFwd.clone();
-      if (inp.blastPressed) this.start(player, 'blast', this.aimAt(player, enemy, fwd, 0.8));
-      else if (inp.punchPressed) this.start(player, 'punch', this.aimAt(player, enemy, fwd, 0.3, 12));
-      else if (inp.tacklePressed) this.start(player, 'tackle', this.aimAt(player, enemy, fwd, 0.75, 160));
+      const fwd = camFwd.clone(), lock = this.lockTarget(enemy);
+      const toE = () => this.chest(enemy, V()).sub(this.chest(player, V())).normalize();
+      if (inp.blastPressed) this.start(player, 'blast', lock ? toE() : this.aimAt(player, enemy, fwd, 0.8));
+      else if (inp.punchPressed) {
+        if (lock) this.start(player, 'punch', toE(), enemy);
+        else { const a = this.aimAt(player, enemy, fwd, 0.8, DASH.assist); const assist = !enemy.ko && (a.dot(fwd) < 0.9999 || this.chest(enemy, V()).distanceTo(this.chest(player, V())) < 5); this.start(player, 'punch', a, assist ? enemy : null); }
+      }
+      else if (inp.tacklePressed) this.start(player, 'tackle', lock ? toE() : this.aimAt(player, enemy, fwd, 0.75, 160), lock ? enemy : null);
     }
     for (const [a, b] of [[player, enemy], [enemy, player]]) this.actionStep(dt, a, b);
     this.updateProjectiles(dt, [player, enemy]);
@@ -137,14 +232,24 @@ export class Combat {
     const act = a.action; if (!act) return;
     const m = MOVES[act.type];
     if (act.type === 'blast' && !act.done && act.t >= m.fireAt) { act.done = true; this.fireBlast(a, b); }
-    if (act.type === 'punch' && !act.done && act.t >= (a.vel.length() > 20 ? 0.05 : m.hitAt)) { // active strike window: a fast flyer can't pass through the target
+    if (act.dash) this.dashStep(dt, a, act);
+    if (act.type === 'punch' && !act.done && act.t >= (a.vel.length() > 20 || act.dashed ? 0.05 : m.hitAt)) { // active strike window: a fast flyer can't pass through the target
       if (!act.swung) { act.swung = true; this.burst(this.handPos(a, V()), a, 14, 6); }
-      if (this.tryPunch(a, b) || act.t > 0.34) act.done = true;
+      if (this.tryPunch(a, b)) { act.done = true; this.endDash(a, act); if (act.dash === null) a.vel.multiplyScalar(0.3); }
+      else if (act.t > 0.34) act.done = true;
     }
     if (act.type === 'tackle') {
+      // homing: steer the drive toward a locked target in 3D
+      if (!a.grabbing && act.target && !act.target.ko) {
+        const to = this.chest(act.target, t1).sub(this.chest(a, t2)).normalize();
+        a.aim.lerp(to, 1 - Math.exp(-dt * 9)).normalize();
+      }
       if (!a.grabbing && !b.ko && !b.ragdoll) {
-        const d = this.chest(a, t1).distanceTo(this.chest(b, t2));
-        if (d < 2.6 + a.vel.length() * dt) this.grab(a, b);
+        // swept test (at 250+ m/s the attacker moves several metres per frame)
+        const cb = this.chest(b, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(b.vel).multiplyScalar(dt), L = rel.length();
+        const c0 = t4.copy(c1).sub(rel); let d;
+        if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
+        if (d < 2.6) this.grab(a, b);
       }
       if (a.grabbing) {
         act.grabT = (act.grabT || 0) + dt;
@@ -158,7 +263,8 @@ export class Combat {
         if (act.grabT > 1.2) { // no building in the way: hurl them forward
           const v = a.grabbing; this.releaseGrab(a);
           this.damage(v, 3 + 0.06 * act.carrySpeed, a, 'throw', { speed: act.carrySpeed });
-          v.vel.copy(act.carryDir).multiplyScalar(act.carrySpeed * 0.7); v.vel.y += 4; this.startRagdoll(v, 8);
+          v.vel.copy(act.carryDir).multiplyScalar(act.carrySpeed * 0.9); v.vel.y += 6; this.startRagdoll(v, 10);
+          this.fx.shockwaveOriented?.(this.chest(v, V()), act.carryDir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 14, 0.5, 0.6);
           a.action = null; return;
         }
       }
@@ -169,22 +275,26 @@ export class Combat {
     const rel = t1.copy(a.vel).sub(b.vel).length();
     a.grabbing = b; b.grabbedBy = a; b.action = null; b.knockT = 0; b.state = 'air';
     const act = a.action; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
-    act.carrySpeed = Math.max(a.def.tackleSpeed * 1.25, a.vel.length() * 1.1);
+    act.carrySpeed = Math.max(a.def.tackleSpeed * 1.25, a.vel.length() * 1.15);
     this.damage(b, 4 + 0.1 * rel, a, 'tackle', { speed: rel });
-    this.shakeNear(a.pos, 0.3); this.fx.flash(this.chest(b, t2), a.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 30, 0.2);
+    this.shakeNear(a.pos, 0.3 + rel / 400); this.fx.flash(this.chest(b, t2), a.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 30, 0.2);
     this.burst(this.chest(b, V()), a, 30, 10);
   }
   carryStep(att, victim) {
     const act = att.action; if (!act) { this.releaseGrab(att); return; }
     const dir = act.carryDir;
     const target = this.chest(att, t1).addScaledVector(dir, 1.7).setY(att.pos.y + 0.1);
+    for (let s = 0.4; s <= 1.7; s += 0.3) { // march from the attacker: stop the victim at the first building face
+      const q = t3.copy(att.pos).addScaledVector(dir, s); q.y = att.pos.y + 0.9;
+      if (this.city.heightAt(q.x, q.z) > q.y) { target.copy(att.pos).addScaledVector(dir, Math.max(0.3, s - 0.4)).setY(att.pos.y + 0.1); break; }
+    }
     victim.pos.copy(target); victim.vel.copy(att.vel); victim.yaw = att.yaw + Math.PI; victim.state = 'air';
     // victim's front edge meets a building -> smash
     const w = this.wallHit(victim.pos.clone().setY(victim.pos.y + 0.8), 0.7);
     if (w && w.normal.dot(dir) < -0.2) {
       const into = -att.vel.dot(w.normal);
       victim.pos.addScaledVector(w.normal, 0.05);
-      this.smash(att, victim, w.normal, w.point.setY(victim.pos.y + 1.2), Math.max(into, act.carrySpeed * 0.5));
+      this.smash(att, victim, w.normal, w.point.setY(victim.pos.y + 1.2), Math.max(into, act.carrySpeed * 0.75));
     }
   }
   tryPunch(a, b) {
@@ -193,7 +303,8 @@ export class Combat {
     if (b.ko || d > reach) return false;
     to.normalize(); if (to.dot(a.aim) < 0.25 && d > 2.2) return false;
     const rel = t4.copy(a.vel).sub(b.vel).dot(to);
-    const sp = Math.max(0, rel);
+    const act = a.action; // a dash punch: count ~30% of the dash plus the momentum you already had (not the full 170 m/s ram)
+    const sp = act?.dashed ? Math.max(0, rel, act.dashPre + DASH.speed * 0.3 - b.vel.dot(to)) : Math.max(0, rel);
     const dmg = this.damage(b, 9 + 0.24 * sp, a, 'punch', { speed: sp });
     const dir = to.clone(); dir.y = Math.max(dir.y, 0);
     this.knockback(b, dir, 48 + 0.5 * sp, 0.3, true, 10);

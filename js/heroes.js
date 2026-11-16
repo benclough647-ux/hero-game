@@ -162,9 +162,9 @@ function centurionModel() {
 }
 
 export const HERO_DEFS = {
-  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 3, tackleSpeed: 85, mass: 1.3,
+  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 3, tackleSpeed: 210, mass: 1.3,
     capeColor: 0xb01010, style: 'fire' },
-  centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 110, mass: 1.0 },
+  centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0 },
 };
 
 // Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
@@ -569,7 +569,13 @@ export class Hero {
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
       const spd = this.grabbing ? act.carrySpeed : d.tackleSpeed;
       const dir = this.grabbing ? act.carryDir : this.aim;
-      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : 7)));
+      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : 9)));
+    }
+    // punch dash: drive straight at the target at dash speed (combat.dashStep re-aims and ends it)
+    if (act && act.type === 'punch' && act.dash && !stun) {
+      if (this.state === 'ground' && this.aim.y > 0.3) { this.state = 'air'; this.fromJump = false; this.pos.y += 0.05; }
+      act.dash.used = Math.min(act.dash.speed, act.dash.cap); this.vel.copy(this.aim).multiplyScalar(act.dash.used);
+      if (this.state === 'ground') this.vel.y = 0;
     }
     // integrate with substeps for robust collisions
     const steps = Math.max(1, Math.ceil(this.vel.length() * dt / 0.8));

@@ -15,7 +15,23 @@ export class ThirdPersonCamera {
     this.right.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
   }
   update(dt, inp, hero, city) {
-    this.yaw -= inp.lookX; this.pitch = THREE.MathUtils.clamp(this.pitch + inp.lookY, -1.25, 1.35);
+    const lt = this.lockTarget; // world point to keep framed (lock-on), or null
+    if (lt) {
+      // right stick still nudges the view; the nudge eases back so the enemy stays framed
+      const ease = Math.exp(-dt * 1.6);
+      this.lockYaw = THREE.MathUtils.clamp((this.lockYaw || 0) - inp.lookX, -0.6, 0.6) * ease;
+      this.lockPitch = THREE.MathUtils.clamp((this.lockPitch || 0) + inp.lookY, -0.4, 0.4) * ease;
+      const sc = hero.def.height / 1.83, dx = lt.x - hero.pos.x, dy = lt.y - (hero.pos.y + 1.2 * sc), dz = lt.z - hero.pos.z, hd = Math.hypot(dx, dz);
+      const wantYaw = Math.atan2(dx, dz) + this.lockYaw;
+      const wantPitch = THREE.MathUtils.clamp(-Math.atan2(dy, Math.max(hd, 0.5)) + 0.12 + this.lockPitch, -1.1, 1.2);
+      const close = THREE.MathUtils.clamp((hd - 1.5) / 6, 0.15, 1); // don't whip around when right on top of them
+      const k = 1 - Math.exp(-dt * 6 * close);
+      let dyaw = (wantYaw - this.yaw) % (Math.PI * 2); if (dyaw > Math.PI) dyaw -= Math.PI * 2; if (dyaw < -Math.PI) dyaw += Math.PI * 2;
+      this.yaw += dyaw * k; this.pitch += (wantPitch - this.pitch) * k;
+    } else {
+      this.lockYaw = this.lockPitch = 0;
+      this.yaw -= inp.lookX; this.pitch = THREE.MathUtils.clamp(this.pitch + inp.lookY, -1.25, 1.35);
+    }
     this.computeAxes();
     const sp = hero.speed, scale = hero.def.height / 1.83;
     const tgt = hero.pos.clone(); tgt.y += (hero.state === 'fly' ? 0.75 : 1.45) * scale; this.t += dt;
@@ -25,6 +41,7 @@ export class ThirdPersonCamera {
     const wantDist = (2.7 * scale + Math.min(1.4, sp * 0.005)) * (hero.charge ? 1 - hero.charge * 0.2 : 1);
     this.dist += (wantDist - this.dist) * Math.min(1, dt * 3);
     if (hero.boomKick) { this.kick += 24 * hero.boomKick; this.shake(1.0); hero.boomKick = 0; } // sonic boom punch
+    if (hero.fovKick) { this.kick += hero.fovKick; this.shake(0.15); hero.fovKick = 0; } // punch dash
     this.kick *= Math.exp(-dt * 2.2);
     const wantFov = 60 + Math.min(14, Math.pow(sp, 0.8) * 0.16) + (hero.superSpeed ? 8 : 0); // speed-based FOV
     this.fov += (wantFov - this.fov) * Math.min(1, dt * 3);

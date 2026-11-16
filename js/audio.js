@@ -31,3 +31,12 @@ export function sonicBoomSound(fire = false) {
   noise(t + 0.05, 2.2, 'lowpass', 260, 60, 0.5, 0.08);
   if (fire) noise(t, 1.1, 'bandpass', 500, 2400, 0.45, 0.05);
 }
+
+// punch dash: short rising air whoosh
+export function whooshSound(fire) {
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime;
+  noise(t, 0.28, 'bandpass', 600, 3200, 0.55, 0.03);
+  noise(t, 0.22, 'highpass', 2500, 6000, 0.18, 0.02);
+  if (fire) noise(t + 0.02, 0.3, 'lowpass', 1800, 400, 0.35, 0.02);
+}

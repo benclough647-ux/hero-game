@@ -110,6 +110,7 @@ function switchHero() {
   idx ^= 1;
   hud.say(`You: ${heroes[idx].def.name}  ·  Rival: ${heroes[idx ^ 1].def.name}`);
 }
+const lockPt = new THREE.Vector3();
 function combatFrame(dt, inp) {
   const P = heroes[idx], E = heroes[idx ^ 1];
   const pFree = !P.ragdoll && !P.grabbedBy, eFree = !E.ragdoll && !E.grabbedBy;
@@ -117,6 +118,8 @@ function combatFrame(dt, inp) {
   const aiInp = combat.aiInput(dt, E, P);
   if (eFree) E.update(dt, aiInp, combat.aiCam, city);
   combat.update(dt, P, E, P.ko ? null : inp, cam.forward);
+  combat.updateLock(dt, P, E, inp);
+  cam.lockTarget = combat.lockOn && !E.ko ? combat.chest(E, lockPt) : null;
   if (P.ragdoll || P.grabbedBy) P.animate(dt, 0);
   if (E.ragdoll || E.grabbedBy) E.animate(dt, 0);
   // KO -> respawn
@@ -146,7 +149,7 @@ function frame() {
 function step(dt, raw, noRender) {
   const h = heroes[idx];
   if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
-  fx.speedLines(dt, h.pos, h.vel, h.superSpeed && h.state === 'fly', h.def.style === 'fire');
+  fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120), h.def.style === 'fire');
   fx.update(dt); traffic.update(dt);
   world.update(dt, camera, h.pos);
   city.update(camera.position, view);
