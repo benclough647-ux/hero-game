@@ -12,3 +12,10 @@ Temper Tiger and Centurion are Ben's original characters. The meshes were genera
 - **Secondary motion:** cape and tail motion is keyframed per clip.
 
 The build scripts are in `tools/rig/` (run with `blender -b --python <script> -- tiger|cent`).
+
+# City credits
+All city art is original and generated in code at load time: no third-party textures or models.
+- **Textures:** asphalt, lane markings, zebra crossings, stop lines, turn arrows, manholes, drains, gutters, paving slabs and grass are drawn on canvases in `js/citytex.js`.
+- **Building facades:** glass curtain wall, concrete office, brick and painted stucco, plus shopfronts and signs, weathering, window recesses, blinds and lit interiors. All of it is a procedural shader in `js/facade.js`.
+- **Props:** street lamps, traffic signals, benches, bins, hydrants, rooftop water tanks, vents, masts, AC units, plant rooms, parapets, cornices, awnings and trees are built from Three.js primitives in `js/city.js`.
+- **Visual reference:** GTA V's city was used only as a look-and-feel reference. Nothing was copied from it.

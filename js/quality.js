@@ -1,8 +1,8 @@
 // Graphics presets + automatic downgrade when the frame rate is poor.
 export const PRESETS = [
-  { name: 'Low', pixel: 0.6, post: false, msaa: 0, shadow: 0, shadowExtent: 0, water: 0, view: 1100 },
-  { name: 'Medium', pixel: 0.8, post: true, msaa: 0, shadow: 1024, shadowExtent: 110, water: 256, view: 1400 },
-  { name: 'High', pixel: 1.0, post: true, msaa: 4, shadow: 2048, shadowExtent: 170, water: 512, view: 1700 },
+  { name: 'Low', pixel: 0.6, post: false, msaa: 0, shadow: 0, shadowExtent: 0, water: 0, view: 1100, detail: 200 },
+  { name: 'Medium', pixel: 0.8, post: true, msaa: 0, shadow: 1024, shadowExtent: 110, water: 256, view: 1400, detail: 320 },
+  { name: 'High', pixel: 1.0, post: true, msaa: 4, shadow: 2048, shadowExtent: 170, water: 512, view: 1700, detail: 450 },
 ];
 export class QualityManager {
   constructor(apply) {

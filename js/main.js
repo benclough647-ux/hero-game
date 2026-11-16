@@ -26,6 +26,7 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.25, 9000);
 const world = new World(scene, renderer);
 const city = new City(scene);
+world.reflectionHide = [...city.detail.map(c => c.group), ...city.treeChunks.map(c => c.group), ...city.propMeshes];
 const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
@@ -53,7 +54,7 @@ function resize() {
 }
 let quality = null;
 quality = new QualityManager(q => {
-  usePost = q.post; view = q.view; world.setQuality(q);
+  usePost = q.post; view = q.view; world.setQuality(q); city.detailDist = q.detail ?? 600;
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) { if (rt.samples !== q.msaa) { rt.samples = q.msaa; rt.dispose(); } }
   city.treeMesh.castShadow = q.shadow >= 2048; traffic.body.castShadow = q.shadow >= 1024;
   scene.fog.density = 0.00042 * 1700 / q.view;

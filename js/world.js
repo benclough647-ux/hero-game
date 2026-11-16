@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { Water } from 'three/addons/objects/Water.js';
-import { WATER_Y } from './city.js';
+import { WATER_Y, HALF, RIVER_X0, RIVER_X1 } from './city.js';
 // Sky (physical Rayleigh/Mie sky shader), image-based lighting from it, sun with hero-following
 // soft shadow frustum, haze, and an ocean with planar reflections (Water shader) + cheap fallback.
 function waterNormals() {
@@ -18,6 +18,18 @@ function waterNormals() {
   g.putImageData(img, 0, 0); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
 }
 
+// Water only where there is water: the ocean (south + east of the city) and the river channel. A single 30 km plane
+// under the whole map used to z-fight / show through the streets at a distance (only 0.6 m below the ground).
+function waterGeometry(E = 15000) {
+  const rects = [[-E, E, HALF, E], [HALF, E, -E, HALF], [RIVER_X0 - 0.5, RIVER_X1 + 0.5, -E, HALF]]; // [x0,x1,z0,z1] in world xz
+  const P = [], U = [], I = [];
+  for (const [x0, x1, z0, z1] of rects) { const b = P.length / 3; // local plane is XY; the mesh is rotated -90deg about X (local y = -world z)
+    for (const [x, z] of [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]) { P.push(x, -z, 0); U.push(x / 30000 + 0.5, -z / 30000 + 0.5); }
+    I.push(b, b + 2, b + 1, b, b + 3, b + 2); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(P.length / 3).fill([0, 0, 1]).flat(), 3)); g.setIndex(I); g.computeBoundingSphere(); return g;
+}
+
 export class World {
   constructor(scene, renderer) {
     this.scene = scene;
@@ -29,21 +41,29 @@ export class World {
     // IBL from the sky
     const pm = new THREE.PMREMGenerator(renderer); const envScene = new THREE.Scene(); const sky2 = new Sky(); sky2.scale.setScalar(1000);
     sky2.material.uniforms.turbidity.value = 9; sky2.material.uniforms.rayleigh.value = 1.1; sky2.material.uniforms.mieCoefficient.value = 0.006; sky2.material.uniforms.sunPosition.value.copy(this.sunDir);
-    envScene.add(sky2); const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16), new THREE.MeshBasicMaterial({ color: 0x3c3f42 })); ground.rotation.x = -Math.PI / 2; ground.position.y = -20; envScene.add(ground);
+    envScene.add(sky2); const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16), new THREE.MeshBasicMaterial({ color: 0x4a4641 })); ground.rotation.x = -Math.PI / 2; ground.position.y = -20; envScene.add(ground);
+    // a ring of warm-grey "city" around the horizon: in a street canyon most of what you see is buildings, not blue sky,
+    // so shadowed surfaces get a neutral bounce instead of a strong blue cast
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(800, 800, 300, 32, 1, true), new THREE.MeshBasicMaterial({ color: 0x77716a, side: THREE.BackSide })); ring.position.y = 130; envScene.add(ring);
+    // and a thin warm-grey veil over the whole sky: shadows read neutral grey-blue (GTA-like) instead of saturated blue
+    const veil = new THREE.Mesh(new THREE.SphereGeometry(850, 24, 12), new THREE.MeshBasicMaterial({ color: 0x8c8780, side: THREE.BackSide, transparent: true, opacity: 0.42, depthWrite: false })); envScene.add(veil);
     scene.environment = pm.fromScene(envScene, 0.02).texture; pm.dispose();
     scene.fog = new THREE.FogExp2(0xbccbd6, 0.00042); scene.background = new THREE.Color(0xbccbd6);
     // lights: soft sky fill + sun
-    this.hemi = new THREE.HemisphereLight(0xdfeaff, 0x5a5650, 0.6); scene.add(this.hemi);
-    const sun = new THREE.DirectionalLight(0xfff1dc, 3.2); sun.position.copy(this.sunDir).multiplyScalar(400);
+    this.hemi = new THREE.HemisphereLight(0xdfeaff, 0x6a5f50, 0.4); scene.add(this.hemi);
+    const sun = new THREE.DirectionalLight(0xffe9cf, 3.8); sun.position.copy(this.sunDir).multiplyScalar(400);
     sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.6; sun.shadow.camera.near = 10; sun.shadow.camera.far = 1400;
     scene.add(sun, sun.target); this.sun = sun;
     // ocean
     this.normals = waterNormals();
-    const geo = new THREE.PlaneGeometry(30000, 30000); this.waters = {};
+    const geo = waterGeometry(); this.waters = {};
     for (const res of [512, 256]) {
       const w = new Water(geo, { textureWidth: res, textureHeight: res, waterNormals: this.normals, sunDirection: this.sunDir.clone(), sunColor: 0xfff4e0,
         waterColor: 0x05202e, distortionScale: 1.4, fog: true, alpha: 1.0 });
-      w.material.uniforms.size.value = 4.0; w.rotation.x = -Math.PI / 2; w.position.y = WATER_Y; w.visible = false; scene.add(w); this.waters[res] = w;
+      w.material.uniforms.size.value = 4.0;
+      // the planar reflection re-renders the scene: skip street furniture / trees / rooftop clutter there (they are tiny in
+      // the reflection but would double their cost)
+      const orig = w.onBeforeRender.bind(w); w.onBeforeRender = (...args) => { const hide = this.reflectionHide || [], was = hide.map(o => o.visible); hide.forEach(o => o.visible = false); orig(...args); hide.forEach((o, k) => o.visible = was[k]); }; w.rotation.x = -Math.PI / 2; w.position.y = WATER_Y; w.visible = false; scene.add(w); this.waters[res] = w;
     }
     const n2 = this.normals.clone(); n2.repeat.set(1200, 1200); n2.needsUpdate = true;
     this.cheapWater = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x0b2c3c, roughness: 0.06, metalness: 0.3, normalMap: n2, normalScale: new THREE.Vector2(0.35, 0.35) }));
