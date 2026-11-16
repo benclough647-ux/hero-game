@@ -371,6 +371,68 @@ function buildRagdoll(B, root, clips) {
   return { joints, hips: B('hips'), prevVel: new THREE.Vector3(), prevW: new THREE.Vector3(), active: false, w: 0 };
 }
 
+// ---------- Centurion eye beam: eye emitters on the head bone + additive upper-body 'eye_beam' clip ----------
+// Eye locations come from the skinned body itself: head-weighted vertices in the bind pose give the face front/height.
+function findEyes(scene, headBone, root) {
+  root.updateMatrixWorld(true);
+  let body = null; scene.traverse(o => { if (o.isSkinnedMesh && !/lod1|cape/i.test(o.name) && (!body || o.geometry.attributes.position.count > body.geometry.attributes.position.count)) body = o; });
+  const out = [];
+  if (body) {
+    const hi = body.skeleton.bones.indexOf(headBone), g = body.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, pos = g.attributes.position, v = new THREE.Vector3(), pts = [];
+    for (let i = 0; i < pos.count; i += 1) {
+      let w = 0; for (let k = 0; k < 4; k++) if (si.getComponent(i, k) === hi) w += sw.getComponent(i, k);
+      if (w < 0.6) continue;
+      v.fromBufferAttribute(pos, i); body.applyBoneTransform(i, v); body.localToWorld(v); root.worldToLocal(v); pts.push(v.clone());
+    }
+    if (pts.length > 30) {
+      let y0 = Infinity, y1 = -Infinity, x1 = 0; for (const p of pts) { y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); x1 = Math.max(x1, Math.abs(p.x)); }
+      const ey = y0 + 0.5 * (y1 - y0), ex = x1 * 0.36;
+      for (const sx of [-1, 1]) { // front-most point of the face at eye height on each side
+        let best = null; for (const p of pts) if (Math.abs(p.y - ey) < 0.025 && Math.abs(p.x - sx * ex) < 0.02 && (!best || p.z > best.z)) best = p;
+        if (best) out.push(new THREE.Vector3(best.x, best.y, best.z + 0.004));
+      }
+    }
+  }
+  if (out.length !== 2) { // fallback: offsets from the head bone
+    const hp = headBone.getWorldPosition(new THREE.Vector3()); root.worldToLocal(hp);
+    out.length = 0; for (const sx of [-1, 1]) out.push(new THREE.Vector3(hp.x + sx * 0.033, hp.y + 0.08, hp.z + 0.1));
+  }
+  return out.map(p => { const o = new THREE.Object3D(); o.name = 'eye'; headBone.add(o); o.position.copy(headBone.worldToLocal(root.localToWorld(p.clone()))); return o; });
+}
+// additive clip: frame 0 = reference pose, then braced beam pose (lean back, head thrust forward, fists low and back)
+function buildEyeBeamClip(B, root) {
+  root.updateMatrixWorld(true);
+  const rootQ = root.getWorldQuaternion(new THREE.Quaternion()), rootQi = rootQ.clone().invert();
+  const modelQ = b => rootQi.clone().multiply(b.getWorldQuaternion(new THREE.Quaternion())); // bone orientation in root (model) space
+  const X = new THREE.Vector3(1, 0, 0);
+  const spec = [
+    ['spine', { rot: -0.1 }], ['chest', { rot: -0.05 }], ['upper_chest', { rot: -0.04 }],
+    ['shoulder.L', { rot: -0.08 }], ['shoulder.R', { rot: -0.08 }],
+    ['neck', { rot: 0.24 }], ['head', { rot: -0.14 }],
+    ['upper_arm.L', { dir: [0.2, -1, -0.24] }], ['upper_arm.R', { dir: [-0.2, -1, -0.24] }],
+    ['forearm.L', { dir: [0.12, -1, -0.34] }], ['forearm.R', { dir: [-0.12, -1, -0.34] }],
+    ['hand.L', { dir: [0.06, -1, -0.15] }], ['hand.R', { dir: [-0.06, -1, -0.15] }],
+  ];
+  const tracks = [], saved = [];
+  for (const [n, s] of spec) {
+    const b = B(n); if (!b) continue;
+    const q0 = b.quaternion.clone(); saved.push([b, q0]);
+    const qm = modelQ(b); let offM;
+    if (s.rot !== undefined) offM = new THREE.Quaternion().setFromAxisAngle(X, s.rot);
+    else offM = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0).applyQuaternion(qm), new THREE.Vector3(...s.dir).normalize());
+    const offL = qm.clone().invert().multiply(offM).multiply(qm); // model-space rotation expressed in the bone's frame
+    const T = q0.clone().multiply(offL), Tb = q0.clone().slerp(T, 0.9);
+    b.quaternion.copy(T); b.updateMatrixWorld(true); // children are posed relative to the new parent pose
+    const vals = []; for (const q of [q0, T, Tb, T, Tb]) vals.push(q.x, q.y, q.z, q.w);
+    tracks.push(new THREE.QuaternionKeyframeTrack(b.name + '.quaternion', [0, 0.12, 0.3, 0.45, 0.6], vals));
+  }
+  for (const [b, q] of saved) b.quaternion.copy(q); root.updateMatrixWorld(true);
+  const clip = new THREE.AnimationClip('eye_beam', 0.6, tracks);
+  THREE.AnimationUtils.makeClipAdditive(clip, 0);
+  return clip;
+}
+const _hb = new THREE.Vector3(), _hf = new THREE.Vector3(), _hq = new THREE.Quaternion(), _hq2 = new THREE.Quaternion();
+
 export class Hero {
   constructor(key, scene, effects) {
     this.key = key; this.def = HERO_DEFS[key]; this.fx = effects; this.scene = scene;
@@ -501,6 +563,18 @@ export class Hero {
     this.fists = fists; this.shoulders = null;
     this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
     mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
+    if (this.def.style === 'clean' && B('head')) {
+      const head = B('head'); this.eyes = findEyes(scene, head, root);
+      const glowMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 5, 6), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+      const sph = new THREE.SphereGeometry(1, 10, 8);
+      this.eyeGlows = this.eyes.map(e => { const m = new THREE.Mesh(sph, glowMat); m.scale.setScalar(0.012); m.renderOrder = 5; m.frustumCulled = false; e.add(m); return m; });
+      this.eyeGlowMat = glowMat; this.eyeGlow = 0;
+      const clip = buildEyeBeamClip(B, root), act = mixer.clipAction(clip);
+      act.blendMode = THREE.AdditiveAnimationBlendMode; act.setLoop(THREE.LoopRepeat, Infinity); act.play(); act.setEffectiveTimeScale(0); act.setEffectiveWeight(0);
+      this.anim.beamAct = act; this.anim.beamW = 0;
+      root.updateMatrixWorld(true); // face direction in the head bone's frame (model faces +Z)
+      this.anim.faceLocal = new THREE.Vector3(0, 0, 1).applyQuaternion(root.getWorldQuaternion(new THREE.Quaternion())).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+    }
     this.useGLB = true; this.useSkin = true; this.hipH = hipH;
     if (this.def.style === 'fire') {
       if (!this.glow) this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5);
@@ -530,6 +604,7 @@ export class Hero {
       if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
       else if (this.grabbedBy && has('fall')) { over = 'fall'; overW = 0.35; }
       else if (hold) { over = null; }
+      else if (act && act.beam) { over = null; } // eye beam: locomotion/flight base + additive upper-body clip
       else if (act && has(act.type)) {
         over = act.type; overW = 1;
         if (act.type === 'punch') drive('punch', act.t * 1.6);       // fist lands ~0.16 s (game hit window)
@@ -542,11 +617,18 @@ export class Hero {
     let sum = 0;
     for (const n in acts) { A.w[n] += ((tgt[n] || 0) - A.w[n]) * Math.min(1, dt * rate); if (A.w[n] < 1e-3) A.w[n] = 0; sum += A.w[n]; }
     for (const n in acts) acts[n].setEffectiveWeight(sum > 0 ? A.w[n] / sum : (n === 'idle' ? 1 : 0));
+    if (A.beamAct) { // eye_beam additive layer
+      const on = !rd && act && act.beam ? 1 : 0; A.beamW += (on - A.beamW) * Math.min(1, dt * 12);
+      A.beamAct.setEffectiveWeight(A.beamW < 1e-3 ? 0 : A.beamW);
+      const bt = act && act.beam ? act.t : 0.6; A.beamAct.time = bt < 0.12 ? bt : 0.12 + ((bt - 0.12) % 0.48);
+    }
     A.mixer.update(dt);
     if (A.rag) this.ragdollJoints(dt, A.rag);
+    if (A.beamAct && A.beamW > 0.01) this.trackHead(A.beamW);
+    if (this.eyeGlowMat) { const gl = this.eyeGlow || 0; this.eyeGlowMat.opacity = Math.min(1, gl * 1.2); for (const m of this.eyeGlows) m.scale.setScalar(0.01 + 0.03 * gl * (0.85 + 0.15 * Math.sin(this.t * 40))); }
     this.chokePose(dt);
     // aim the striking arm at the target (pitch), compensating for whole-body lean
-    if (!rd && act && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
+    if (!rd && act && !act.beam && (act.type === 'blast' || act.type === 'punch') && A.upperArmR) {
       const k = A.w[act.type] / Math.max(sum, 1e-3);
       const pitch = Math.asin(THREE.MathUtils.clamp(this.aim.y, -1, 1)) + this.rig.body.rotation.x;
       const bone = A.upperArmR; this.rig.root.updateMatrixWorld(true);
@@ -612,6 +694,22 @@ export class Hero {
       if (ang > 1e-5) j.bone.quaternion.multiply(_rq.setFromAxisAngle(_rt.copy(j.th).divideScalar(j.th.length()), ang));
     }
   }
+  // eye beam: neck + head turn the face toward the beam's aim point (clamped)
+  trackHead(w) {
+    const A = this.anim, head = A.B('head'), neck = A.B('neck'); if (!head || !A.faceLocal) return;
+    const tgt = this.beamTarget; if (!tgt) return;
+    this.rig.root.updateMatrixWorld(true);
+    for (const [bone, k] of [[neck, 0.4], [head, 0.6]]) {
+      if (!bone) continue;
+      head.getWorldPosition(_hb); head.getWorldQuaternion(_hq);
+      const face = _hf.copy(A.faceLocal).applyQuaternion(_hq), to = _hb.subVectors(tgt, _hb).normalize();
+      let ang = face.angleTo(to); if (ang < 1e-3) continue;
+      const lim = Math.min(ang, 0.9) / ang;
+      _hq2.setFromUnitVectors(face, to).slerp(_qI, 1 - lim * k * w);
+      bone.getWorldQuaternion(_hq); _hq.premultiply(_hq2); bone.parent.getWorldQuaternion(_cp); bone.quaternion.copy(_cp.invert().multiply(_hq)); bone.updateMatrixWorld(true);
+    }
+  }
+  eyePositions(out) { if (!this.eyes) return null; this.rig.root.updateMatrixWorld(true); return this.eyes.map((e, i) => e.getWorldPosition(out[i])); }
   // ---- choke hold posing on the skinned rig (attacker: arm up gripping the throat, other fist cocked; victim: dangling, clawing) ----
   aimBone(bone, dir, w = 1) {
     if (!bone || w <= 0) return;
@@ -896,7 +994,8 @@ export class Hero {
     if (a) {
       const k = a.t / a.dur, aimPitch = Math.asin(THREE.MathUtils.clamp(this.aim.y, -1, 1));
       const forward = -(Math.PI / 2 + aimPitch + bodyPitch);
-      if (a.type === 'blast') { const up = Math.min(1, a.t / 0.12) * (k > 0.8 ? (1 - k) / 0.2 : 1); rx = rx + (forward - rx) * up; ro = -0.08 * up; lx = 0.25; lo = 0.15; }
+      if (a.type === 'blast' && a.beam) { rx = lx = -0.25; ro = 0.2; lo = 0.2; }
+      else if (a.type === 'blast') { const up = Math.min(1, a.t / 0.12) * (k > 0.8 ? (1 - k) / 0.2 : 1); rx = rx + (forward - rx) * up; ro = -0.08 * up; lx = 0.25; lo = 0.15; }
       else if (a.type === 'punch') {
         if (a.t < 0.13) { rx = 0.7 * (a.t / 0.13); ro = 0.25; } else { const e = Math.min(1, (a.t - 0.13) / 0.06) * (k > 0.75 ? (1 - k) / 0.25 : 1); rx = 0.7 + (forward - 0.7) * e; ro = -0.12 * e; }
         lx = 0.35; lo = 0.2;
