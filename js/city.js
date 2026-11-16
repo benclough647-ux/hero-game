@@ -242,7 +242,9 @@ export class City {
         else { pos.z = b.maxZ + r; if (vel.z < 0) vel.z = 0; }
       }
     }
-    const lim = HALF + 2500; pos.x = Math.max(-lim, Math.min(lim, pos.x)); pos.z = Math.max(-lim, Math.min(lim, pos.z));
+    const lim = HALF + 2500;
+    if (Math.abs(pos.x) > lim) { pos.x = Math.sign(pos.x) * lim; if (vel.x * pos.x > 0) vel.x = 0; }
+    if (Math.abs(pos.z) > lim) { pos.z = Math.sign(pos.z) * lim; if (vel.z * pos.z > 0) vel.z = 0; }
     return floor;
   }
   update(camPos, viewDist) {

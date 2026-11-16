@@ -400,7 +400,7 @@ export class Combat {
     this.reset(h, p); h.state = 'fly'; h.vel.set(0, 0, 0);
   }
   reset(h, p) {
-    h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0;
+    h.endSuper?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0;
     if (p) h.pos.copy(p); h.vel.set(0, 0, 0); h.rig.body.rotation.set(0, 0, 0); h.state = h.pos.y > 0.5 ? 'air' : 'ground';
   }
   inCombat(player, enemy) {

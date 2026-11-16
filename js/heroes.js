@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { sonicBoomSound } from './audio.js';
 // Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
 // and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -161,11 +162,14 @@ function centurionModel() {
 }
 
 export const HERO_DEFS = {
-  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 55, flyBoost: 125, flyAccel: 1.6, turn: 3, tackleSpeed: 85, mass: 1.3,
+  tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 3, tackleSpeed: 85, mass: 1.3,
     capeColor: 0xb01010, style: 'fire' },
   centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 110, mass: 1.0 },
 };
 
+// Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
+const SUPER_MULT = 2.5;
+const JET_GEO = (() => { const g = new THREE.ConeGeometry(0.1, 1, 14, 4, true); g.translate(0, 0.5, 0); return g; })(); // base at origin, tip at +Y
 const NO_INP = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
 const _v = new THREE.Vector3();
 const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; };
@@ -331,6 +335,11 @@ export class Hero {
     this.hp = 100; this.maxHp = 100; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0 };
     this.ragdoll = null; this.grabbedBy = null; this.grabbing = null; this.ko = false; this.aim = V(0, 0, 1); this.shoulders = null;
     this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
+    this.superSpeed = false; this.superT = 0; this.superIdle = 0; this.boomKick = 0; this.visibleFlag = true;
+    if (this.def.style === 'fire') { // world-space flame jets that follow the hand/foot anchors
+      this.jetMat = flameMat(); this.jets = [];
+      for (let i = 0; i < 4; i++) { const m = new THREE.Mesh(JET_GEO, this.jetMat); m.frustumCulled = false; m.castShadow = false; m.visible = false; m.renderOrder = 3; scene.add(m); this.jets.push(m); }
+    }
     if (this.def.style === 'fire') { this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5); this.rig.body.add(this.glow); this.glow.position.y = 0.4; }
   }
   forceFly() { // used by the AI to get airborne without button sequences
@@ -338,7 +347,18 @@ export class Hero {
     if (this.def.style === 'fire') { if (this.state === 'ground') { this.vel.y = 30; this.fireBurst(this.pos, 40, 12); } this.startFly(); }
     else { if (this.state === 'ground') this.takeOff(); else this.state = 'fly'; }
   }
-  setVisible(v) { this.rig.root.visible = v; if (this.glow) this.glow.visible = v; }
+  setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (!v && this.jets) for (const j of this.jets) j.visible = false; }
+  // LS while flying: sonic boom, then super speed until you stop flying, let go of the stick, slow down, or press LS again
+  sonicBoom(cam) {
+    const fire = this.def.style === 'fire';
+    const dir = this.vel.lengthSq() > 25 ? this.vel.clone().normalize() : (cam?.forward ? cam.forward.clone() : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)));
+    this.superSpeed = true; this.superT = 0; this.superIdle = 0; this.boomKick = 1;
+    this.vel.addScaledVector(dir, this.def.flyBoost * 0.6);
+    this.fx.sonicBoom(this.pos.clone().add(new THREE.Vector3(0, 0.4, 0)), dir, { fire, follow: this.pos });
+    if (fire) this.fireBurst(this.pos, 120, 30);
+    sonicBoomSound(fire);
+  }
+  endSuper() { this.superSpeed = false; this.superIdle = 0; }
 
   // Swap the primitive fallback for loaded LOD meshes. Safe to call once; no-ops if levels are missing.
   adoptModels(levels) {
@@ -503,7 +523,7 @@ export class Hero {
     }
   }
   get speed() { return this.vel.length(); }
-  get modeLabel() { return { ground: 'On foot', air: 'Airborne', fly: this.def.style === 'fire' ? 'Fire flight' : 'Flying' }[this.state] + (this.charge > 0 ? ' – charging leap' : ''); }
+  get modeLabel() { return { ground: 'On foot', air: 'Airborne', fly: this.def.style === 'fire' ? 'Fire flight' : 'Flying' }[this.state] + (this.superSpeed ? ' – SUPER SPEED' : '') + (this.charge > 0 ? ' – charging leap' : ''); }
 
   update(dt, inp, cam, city) {
     const d = this.def, fire = d.style === 'fire'; this.t += dt;
@@ -536,6 +556,11 @@ export class Hero {
       } else if (stun) this.vel.multiplyScalar(Math.exp(-dt * 1.2));
       else this.flyUpdate(dt, inp, cam);
       if (inp.cancelPressed && this.state === 'fly') this.state = 'air';
+    }
+    if (inp.superPressed && !stun) { if (this.superSpeed) this.endSuper(); else if (this.state === 'fly') this.sonicBoom(cam); }
+    if (this.superSpeed) {
+      this.superT += dt;
+      if (this.state !== 'fly' || this.grabbedBy || (this.superT > 0.8 && this.vel.length() < d.flyBoost * 0.5)) this.endSuper();
     }
 
     // combat movement overrides: tackle dash / carrying a grabbed enemy, punch lunge
@@ -602,10 +627,11 @@ export class Hero {
     const dir = V().addScaledVector(cam.forward, inp.moveY).addScaledVector(cam.right, inp.moveX);
     dir.y += (inp.jump ? 1 : 0) - inp.descend;
     const len = Math.min(1, dir.length()); if (len > 0) dir.normalize();
-    const spd = (d.fly + (d.flyBoost - d.fly) * inp.boost) * len;
+    if (this.superSpeed) { if (len < 0.2) { if ((this.superIdle += dt) > 0.35) this.endSuper(); } else this.superIdle = 0; }
+    const top = this.superSpeed ? d.flyBoost * SUPER_MULT : d.fly + (d.flyBoost - d.fly) * inp.boost;
+    const spd = top * len;
     const tgt = dir.multiplyScalar(spd);
-    // Centurion: precise, snappy; Tiger: heavier fire propulsion with slight sag
-    const a = Math.min(1, dt * d.flyAccel * (len > 0 ? 1 : 0.8));
+    const a = Math.min(1, dt * d.flyAccel * (len > 0 ? (this.superSpeed ? 0.8 : 1) : 0.8));
     this.vel.lerp(tgt, a);
     if (d.style === 'fire' && len === 0) this.vel.y -= 2 * dt;
   }
@@ -617,6 +643,7 @@ export class Hero {
     this.landSquash += (1 - this.landSquash) * Math.min(1, dt * 8);
     this.leapStretch += (1 - this.leapStretch) * Math.min(1, dt * 5);
     r.root.position.copy(this.pos); r.root.rotation.y = this.yaw;
+    if (this.superSpeed && (this.ragdoll || this.state !== 'fly')) this.endSuper();
     if (this.ragdoll && this.useGLB) { this.animateRagdoll(dt); if (this.useSkin) this.animateSkin(dt, 0, 0); return; }
 
     if (this.useGLB) {
@@ -738,19 +765,35 @@ export class Hero {
     if (!this.useGLB && r.flameMat) {
       r.flameMat.uniforms.t.value = this.t; r.flames.forEach((f, i) => { const s = 0.8 + Math.sin(this.t * 20 + i * 2) * 0.3 + Math.random() * 0.2; f.scale.set(1, s, 1); });
     }
-    const yel = new THREE.Color(2.6, 1.4, 0.35), red = new THREE.Color(1.6, 0.18, 0.02), wht = new THREE.Color(3, 2.6, 1.8);
+    const yel = new THREE.Color(3.2, 1.5, 0.3), red = new THREE.Color(2.0, 0.25, 0.03), wht = new THREE.Color(3.4, 2.8, 1.8);
     if (!this.useGLB && r.head && Math.random() < 0.5) { r.head.localToWorld(w.set(0, 0.2, 0)); fx.emit(w, v.set(0, 3, 0).add(this.vel), 0.25, yel, red); }
     if (this.charge > 0) for (const h of [...r.hands, ...r.feet]) { h.getWorldPosition(w); fx.emit(w, v.set((Math.random() - .5) * 3, 2 + Math.random() * 3, (Math.random() - .5) * 3), 0.35, yel, red); }
-    const jet = fly || (this.state === 'air' && this.vel.y > 10);
-    if (this.glow) this.glow.intensity += ((fly ? 60 : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 6);
+    const jet = !this.ragdoll && (fly || (this.state === 'air' && this.vel.y > 6));
+    if (this.glow) this.glow.intensity += ((jet ? 60 : this.charge * 30) - this.glow.intensity) * Math.min(1, dt * 6);
+    // jet direction: opposite to travel (straight down when hovering)
+    const back = this.vel.clone(); const sp = back.length(); if (sp > 3) back.multiplyScalar(-1 / sp); else back.set(0, -1, 0);
+    if (this.jets) {
+      const anchors = [...r.hands, ...r.feet], show = this.visibleFlag && (jet || this.charge > 0.05);
+      this.jetMat.uniforms.t.value = this.t;
+      for (let i = 0; i < this.jets.length; i++) {
+        const m = this.jets[i], a = anchors[i];
+        if (!show || !a) { m.visible = false; continue; }
+        a.getWorldPosition(m.position); m.visible = true;
+        const dirv = jet ? back : V(0, 1, 0);
+        m.quaternion.setFromUnitVectors(V(0, 1, 0), dirv);
+        const fl = 0.85 + 0.25 * Math.sin(this.t * 31 + i * 1.7) + 0.1 * Math.random();
+        const len = jet ? (i < 2 ? 0.9 : 0.75) * (1 + Math.min(2.4, sp / 70)) * (this.superSpeed ? 1.6 : 1) : 0.35 + this.charge * 0.4;
+        const rad = (i < 2 ? 1.5 : 1.25) * (this.superSpeed ? 1.3 : 1);
+        m.scale.set(rad * fl, len * fl, rad * fl);
+      }
+    }
     if (!jet) return;
-    // jets from hands and feet, pushed opposite to travel + trail
-    const back = this.vel.clone(); const sp = back.length(); if (sp > 1) back.multiplyScalar(-1 / sp); else back.set(0, -1, 0);
-    const n = Math.ceil(dt * 260);
+    // particle jets from hands and feet, pushed opposite to travel + trail
+    const n = Math.ceil(dt * 420);
     for (const h of [...r.hands, ...r.feet]) for (let i = 0; i < n / 2; i++) {
       h.getWorldPosition(w); w.addScaledVector(this.vel, -Math.random() * dt);
-      v.copy(back).multiplyScalar(8 + Math.random() * 6).add(V((Math.random() - .5) * 4, (Math.random() - .5) * 4, (Math.random() - .5) * 4)).addScaledVector(this.vel, 0.9);
-      fx.emit(w, v, 0.12 + Math.random() * 0.18, Math.random() < 0.3 ? wht : yel, red);
+      v.copy(back).multiplyScalar(10 + Math.random() * 8).add(V((Math.random() - .5) * 4, (Math.random() - .5) * 4, (Math.random() - .5) * 4)).addScaledVector(this.vel, 0.85);
+      fx.emit(w, v, 0.15 + Math.random() * 0.25, Math.random() < 0.25 ? wht : yel, red);
     }
   }
 }

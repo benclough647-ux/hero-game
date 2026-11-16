@@ -8,6 +8,8 @@ import { City, BLOCK, HALF, WATER_Y } from './city.js';
 import { World } from './world.js';
 import { Traffic } from './traffic.js';
 import { Hero, preloadHeroModels } from './heroes.js';
+import { unlockAudio } from './audio.js';
+for (const ev of ['pointerdown', 'keydown', 'touchstart']) addEventListener(ev, unlockAudio, { passive: true });
 import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
@@ -28,6 +30,7 @@ const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 const heroes = [new Hero('tiger', scene, fx), new Hero('centurion', scene, fx)];
 Hero.viewer = camera; // used for the rigged models' LOD switch
+fx.viewer = camera; // sonic-boom vapour cone fades when the camera is inside it
 let idx = 0; heroes[0].setVisible(false); heroes[1].setVisible(false);
 heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 heroes[1].pos.set(-HALF + 20 * BLOCK + 9 + 40, 0, -HALF + 22 * BLOCK + 9); heroes[1].yaw = -Math.PI / 2;
@@ -99,7 +102,7 @@ preloadHeroModels((p, url) => {
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
   const save = { pos: b.pos.clone(), vel: b.vel.clone(), yaw: b.yaw, state: b.state, hp: b.hp, ko: b.ko, rag: b.ragdoll, koT: b.koT };
-  for (const h of [a, b]) { if (h.grabbing) combat.releaseGrab(h); h.action = null; }
+  for (const h of [a, b]) { if (h.grabbing) combat.releaseGrab(h); h.action = null; h.endSuper(); }
   b.pos.copy(a.pos); b.vel.copy(a.vel); b.yaw = a.yaw; b.state = a.state; b.charge = 0; b.flyBlend = a.flyBlend; b.hp = a.hp; b.ko = a.ko; b.koT = a.koT;
   b.ragdoll = a.ragdoll; if (!b.ragdoll) b.rig.body.rotation.set(0, 0, 0);
   a.pos.copy(save.pos); a.vel.copy(save.vel); a.yaw = save.yaw; a.state = save.state; a.charge = 0; a.hp = save.hp; a.ko = save.ko; a.koT = save.koT;
@@ -129,6 +132,7 @@ function frame() {
   if (paused) return;
   const raw = clock.getDelta(), dt = Math.min(raw, 1 / 20);
   const inp = input.update(dt);
+  if (inp.anyPressed || inp.superPressed) unlockAudio(); // controller presses (may not count as a gesture everywhere)
   if (inp.hudPressed) hud.toggle();
   if (inp.qualityPressed) hud.say('Graphics: ' + quality.cycle());
   const h = heroes[idx];
@@ -142,6 +146,7 @@ function frame() {
 function step(dt, raw, noRender) {
   const h = heroes[idx];
   if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
+  fx.speedLines(dt, h.pos, h.vel, h.superSpeed && h.state === 'fly', h.def.style === 'fire');
   fx.update(dt); traffic.update(dt);
   world.update(dt, camera, h.pos);
   city.update(camera.position, view);

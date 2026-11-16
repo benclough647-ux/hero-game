@@ -25,7 +25,7 @@ export class HUD {
     this.charge.style.display = h.charge > 0 ? 'block' : 'none'; this.bar.style.width = (h.charge * 100) + '%';
     if (pad !== this.lastPad) { this.lastPad = pad;
       this.hint.innerHTML = pad
-        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> blast · <b>LT</b> tackle · <b>X</b> super punch · <b>RB</b> boost/sprint · <b>LB</b> descend · <b>B</b> stop flying · <b>Y</b> switch hero · <b>View</b> HUD'
-        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> blast · <b>Right click/R</b> tackle · <b>X/V</b> super punch · <b>Shift</b> boost · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero · <b>H</b> HUD · <b>G</b> graphics'; }
+        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> blast · <b>LT</b> tackle · <b>X</b> super punch · <b>RB</b> boost/sprint · <b>LS</b> (click) sonic boom → super speed while flying · <b>LB</b> descend · <b>B</b> stop flying · <b>Y</b> switch hero · <b>View</b> HUD'
+        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> blast · <b>Right click/R</b> tackle · <b>X/V</b> super punch · <b>Shift</b> boost · <b>B</b> sonic boom (while flying) · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero · <b>H</b> HUD · <b>G</b> graphics'; }
   }
 }

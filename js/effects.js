@@ -49,7 +49,44 @@ function crackTexture() {
     for (let s = 0; s < 6; s++) { a += (Math.random() - 0.5) * 0.9; x += Math.cos(a) * 9; y += Math.sin(a) * 9; g.lineTo(x, y); g.lineWidth = Math.max(0.6, 3 - s * 0.5); } g.stroke(); }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
-const V = new THREE.Vector3(), P = new THREE.Vector3();
+const V = new THREE.Vector3(), P = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+// vapour-cone texture: bright, streaky rim fading towards the apex (cone uv.y: 0 = rim, 1 = apex)
+function vaporTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128; const g = c.getContext('2d');
+  for (let x = 0; x < 256; x++) { const n = 0.55 + 0.45 * Math.random();
+    const gr = g.createLinearGradient(0, 128, 0, 0); gr.addColorStop(0, `rgba(255,255,255,${0.95 * n})`); gr.addColorStop(0.25, `rgba(255,255,255,${0.55 * n})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(x, 0, 1, 128); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = THREE.RepeatWrapping; return t;
+}
+// speed streaks: thin additive lines flowing past the hero while in super speed
+class Streaks {
+  constructor(scene, n = 110) {
+    this.n = n; this.pos = new Float32Array(n * 6); this.col = new Float32Array(n * 6); this.s = []; this.k = 0;
+    for (let i = 0; i < n; i++) this.s.push(this.spawn({}, true));
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
+    this.lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.lines.frustumCulled = false; this.lines.visible = false; scene.add(this.lines);
+    this.u = new THREE.Vector3(); this.w = new THREE.Vector3(); this.d = new THREE.Vector3(); this.a = new THREE.Vector3(); this.c = new THREE.Color();
+  }
+  spawn(o, any) { o.th = Math.random() * Math.PI * 2; o.r = 2.2 + Math.random() * 9; o.z = any ? (Math.random() * 2 - 1) * 45 : 45; o.b = 0.4 + Math.random() * 0.6; return o; }
+  update(dt, center, vel, target, tint) {
+    this.k += (target - this.k) * Math.min(1, dt * 4);
+    if (this.k < 0.01) { this.lines.visible = false; return; }
+    this.lines.visible = true;
+    const sp = vel.length(); this.d.copy(vel).divideScalar(sp || 1); if (sp < 1) this.d.set(0, 0, 1);
+    this.u.crossVectors(this.d, Math.abs(this.d.y) > 0.9 ? V.set(1, 0, 0) : UP).normalize(); this.w.crossVectors(this.d, this.u);
+    const len = 4 + Math.min(14, sp * 0.015), flow = 120 + sp * 0.25;
+    for (let i = 0; i < this.n; i++) {
+      const s = this.s[i]; s.z -= flow * dt; if (s.z < -45) this.spawn(s, false);
+      this.a.copy(center).addScaledVector(this.d, s.z).addScaledVector(this.u, Math.cos(s.th) * s.r).addScaledVector(this.w, Math.sin(s.th) * s.r);
+      const o = i * 6; this.pos[o] = this.a.x; this.pos[o + 1] = this.a.y; this.pos[o + 2] = this.a.z;
+      this.pos[o + 3] = this.a.x - this.d.x * len; this.pos[o + 4] = this.a.y - this.d.y * len; this.pos[o + 5] = this.a.z - this.d.z * len;
+      const fade = this.k * s.b * 0.55 * Math.min(1, (45 - Math.abs(s.z)) / 12);
+      this.col[o] = tint.r * fade; this.col[o + 1] = tint.g * fade; this.col[o + 2] = tint.b * fade; this.col[o + 3] = this.col[o + 4] = this.col[o + 5] = 0;
+    }
+    this.lines.geometry.attributes.position.needsUpdate = true; this.lines.geometry.attributes.color.needsUpdate = true;
+  }
+}
 export class Effects {
   constructor(scene) {
     this.scene = scene;
@@ -66,12 +103,44 @@ export class Effects {
     for (let i = 0; i < 18; i++) { const m = new THREE.Mesh(this.decalGeo, new THREE.MeshStandardMaterial({ map: this.decalTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, roughness: 1, color: 0x222222 }));
       m.visible = false; m.renderOrder = 2; scene.add(m); this.decals.push(m); }
     this.rings = []; this.ringGeo = new THREE.RingGeometry(0.8, 1, 64); this.ringGeo.rotateX(-Math.PI / 2);
+    this.booms = []; this.vaporTex = vaporTexture();
+    this.coneGeo = new THREE.ConeGeometry(1, 1, 48, 1, true); this.coneGeo.translate(0, -0.5, 0); // apex at origin, opening towards -Y
+    this.streaks = new Streaks(scene); this.streakTint = new THREE.Color(1.4, 1.5, 1.7);
     this.cSpray0 = new THREE.Color(1.6, 1.7, 1.8); this.cSpray1 = new THREE.Color(0.75, 0.82, 0.88);
   }
   shockwave(p, color = 0xffffff, maxR = 25) {
     const m = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false }));
     m.position.copy(p); m.position.y += 0.3; this.scene.add(m); this.rings.push({ m, t: 0, maxR });
   }
+  // ring expanding in the plane perpendicular to dir
+  shockwaveOriented(p, dir, color = 0xffffff, maxR = 40, dur = 0.6, opacity = 0.75) {
+    const m = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false }));
+    m.position.copy(p); m.quaternion.setFromUnitVectors(UP, dir); this.scene.add(m); this.rings.push({ m, t: 0, maxR, dur, op: opacity });
+  }
+  // Sonic boom: vapour cone around the hero, perpendicular shock rings, radial vapour (and fire for Tiger), flash
+  sonicBoom(pos, dir, { fire = false, follow = null } = {}) {
+    const d = dir.clone().normalize();
+    const mat = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: fire ? 0xffd2a0 : 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
+    const cone = new THREE.Mesh(this.coneGeo, mat); cone.frustumCulled = false;
+    cone.quaternion.setFromUnitVectors(V.set(0, -1, 0), d.clone().negate()); // apex leads, rim trails behind
+    cone.position.copy(pos); this.scene.add(cone);
+    this.booms.push({ m: cone, t: 0, dur: 0.75, d, follow, off: 2.2 });
+    if (fire) { const fm = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: new THREE.Color(4, 1.4, 0.25), transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
+      const fc = new THREE.Mesh(this.coneGeo, fm); fc.frustumCulled = false; fc.quaternion.copy(cone.quaternion); fc.position.copy(pos); this.scene.add(fc);
+      this.booms.push({ m: fc, t: 0, dur: 0.6, d, follow, off: 1.4, k: 0.8 }); }
+    this.shockwaveOriented(pos, d, fire ? 0xffb070 : 0xffffff, 70, 0.7, 0.8);
+    this.shockwaveOriented(P.copy(pos).addScaledVector(d, -6), d, 0xdfe8f0, 40, 0.9, 0.45);
+    const u = new THREE.Vector3().crossVectors(d, Math.abs(d.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : UP).normalize(), w = new THREE.Vector3().crossVectors(d, u);
+    const c0 = new THREE.Color(0xf4f8ff), c1 = new THREE.Color(0xaab4c0), f0 = new THREE.Color(5, 2.6, 0.6), f1 = new THREE.Color(2.2, 0.3, 0.03);
+    for (let i = 0; i < 160; i++) { const a = Math.random() * Math.PI * 2, s = 35 + Math.random() * 55;
+      V.copy(u).multiplyScalar(Math.cos(a) * s).addScaledVector(w, Math.sin(a) * s).addScaledVector(d, -Math.random() * 25);
+      P.copy(pos).addScaledVector(u, Math.cos(a) * 2).addScaledVector(w, Math.sin(a) * 2);
+      this.dust.emit(P, V, 0.5 + Math.random() * 0.6, c0, c1);
+      if (fire) this.fire.emit(P, V.multiplyScalar(0.8), 0.35 + Math.random() * 0.4, f0, f1);
+      else if (i % 2) this.spark.emit(P, V.multiplyScalar(0.7), 0.2 + Math.random() * 0.2, c0, c1); }
+    this.flash(pos, fire ? 0xff8030 : 0xdde8ff, 90, 0.4);
+  }
+  speedLines(dt, center, vel, on, fire) { this.streakTint.setRGB(fire ? 1.8 : 1.4, fire ? 1.1 : 1.5, fire ? 0.6 : 1.7); this.streaks.update(dt, center, vel, on ? 1 : 0, this.streakTint); }
   dustBurst(p, n = 60, speed = 25) {
     const c0 = new THREE.Color(0xc8bfae), c1 = new THREE.Color(0x77706a);
     for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, s = speed * (0.3 + Math.random() * 0.7);
@@ -109,7 +178,15 @@ export class Effects {
     this.debris.update(dt, -30); this.spark.update(dt, -12);
     if (this.lightT > 0) { this.lightT -= dt; if (this.lightT <= 0) this.light.intensity = 0; else this.light.intensity *= Math.exp(-dt * 5 / this.lightDur); }
     this.fire.update(dt, 6); this.dust.update(dt, 0.8); this.spray.update(dt, -26);
-    this.rings = this.rings.filter(r => { r.t += dt / 0.6; const s = 1 + r.t * r.maxR; r.m.scale.set(s, 1, s); r.m.material.opacity = 0.6 * (1 - r.t);
+    this.booms = this.booms.filter(b => { b.t += dt / b.dur; const e = 1 - Math.pow(1 - Math.min(1, b.t), 3), k = b.k || 1;
+      if (b.follow && b.t < 0.45) b.m.position.copy(b.follow).addScaledVector(b.d, b.off);
+      const r = (1.2 + 5.5 * e) * k, l = (3 + 18 * e) * k; b.m.scale.set(r, l, r); let op = 0.6 * Math.pow(1 - Math.min(1, b.t), 1.5);
+      if (this.viewer) { // camera inside the cone (chase view): thin it out so it doesn't white out the screen
+        const rel = P.subVectors(this.viewer.position, b.m.position), along = -rel.dot(b.d), radial = rel.addScaledVector(b.d, along).length();
+        if (along > 0 && along < l && radial < r * along / l + 1) op *= 0.3; }
+      b.m.material.opacity = op;
+      if (b.t >= 1) { this.scene.remove(b.m); b.m.material.dispose(); return false; } return true; });
+    this.rings = this.rings.filter(r => { r.t += dt / (r.dur || 0.6); const s = 1 + r.t * r.maxR; r.m.scale.set(s, 1, s); r.m.material.opacity = (r.op || 0.6) * (1 - r.t);
       if (r.t >= 1) { this.scene.remove(r.m); r.m.material.dispose(); return false; } return true; });
   }
 }

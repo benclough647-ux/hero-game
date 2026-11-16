@@ -4,7 +4,7 @@ export class ThirdPersonCamera {
   constructor(cam) {
     this.cam = cam; this.yaw = Math.PI; this.pitch = 0.06; this.dist = 5; this.fov = 62; this.t = 0;
     this.forward = new THREE.Vector3(); this.flatForward = new THREE.Vector3(); this.right = new THREE.Vector3();
-    this.target = new THREE.Vector3(); this.inited = false; this.shakeAmt = 0; this.computeAxes();
+    this.target = new THREE.Vector3(); this.inited = false; this.shakeAmt = 0; this.kick = 0; this.computeAxes();
   }
   shake(a) { this.shakeAmt = Math.min(1.2, this.shakeAmt + a); }
   get yawFacing() { return this.yaw; }
@@ -24,9 +24,11 @@ export class ThirdPersonCamera {
     this.target.lerp(tgt, 1 - Math.exp(-dt * 40)); this.target.addScaledVector(tgt.clone().sub(this.target), 0.85);
     const wantDist = (2.7 * scale + Math.min(1.4, sp * 0.005)) * (hero.charge ? 1 - hero.charge * 0.2 : 1);
     this.dist += (wantDist - this.dist) * Math.min(1, dt * 3);
-    const wantFov = 60 + Math.min(14, Math.pow(sp, 0.8) * 0.16); // speed-based FOV
+    if (hero.boomKick) { this.kick += 24 * hero.boomKick; this.shake(1.0); hero.boomKick = 0; } // sonic boom punch
+    this.kick *= Math.exp(-dt * 2.2);
+    const wantFov = 60 + Math.min(14, Math.pow(sp, 0.8) * 0.16) + (hero.superSpeed ? 8 : 0); // speed-based FOV
     this.fov += (wantFov - this.fov) * Math.min(1, dt * 3);
-    this.cam.fov = this.fov; this.cam.updateProjectionMatrix();
+    this.cam.fov = Math.min(110, this.fov + this.kick); this.cam.updateProjectionMatrix();
     const shoulder = this.right.clone().multiplyScalar(-0.35 * scale);
     // pull camera in if a building is in the way
     let d = this.dist; const p = new THREE.Vector3();
