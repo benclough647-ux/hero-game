@@ -1,3 +1,4 @@
+const THREE_clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 // HUD is hidden by default for a clean cinematic screen. Toggle with H (keyboard) or View/Back (controller).
 export class HUD {
   constructor() { this.root = document.getElementById('hud'); this.hero = document.getElementById('hero'); this.stats = document.getElementById('stats'); this.mode = document.getElementById('mode');
@@ -13,7 +14,7 @@ export class HUD {
     this.pBar.style.width = Math.max(0, 100 * player.hp / player.maxHp) + '%'; this.eBar.style.width = Math.max(0, 100 * enemy.hp / enemy.maxHp) + '%';
     this.pBar.style.background = col(player); this.eBar.style.background = col(enemy);
     this.pName.textContent = player.def.name; this.eName.textContent = enemy.def.name;
-    if (this.pHp) { this.pHp.textContent = Math.max(0, Math.ceil(player.hp)); this.eHp.textContent = Math.max(0, Math.ceil(enemy.hp)); }
+    if (this.pHp) { this.pHp.textContent = `${Math.max(0, Math.ceil(player.hp))} / ${player.maxHp}`; this.eHp.textContent = `${Math.max(0, Math.ceil(enemy.hp))} / ${enemy.maxHp}`; }
   }
   // choke-grab timer bar + prompts (always shown, even with the HUD hidden)
   grab(st, pad, fire) {
@@ -23,9 +24,27 @@ export class HUD {
     this.gEl.style.display = 'block';
     this.gBar.style.width = (100 * st.left / st.max).toFixed(1) + '%'; this.gBar.style.background = st.left < 1.5 ? '#ff5a3a' : (fire ? '#ff9a40' : '#ffe6a0');
     const ch = st.mode === 'punch'; this.gCh.style.display = ch ? 'block' : 'none'; if (ch) { this.gCh.firstElementChild.style.width = (100 * st.charge).toFixed(0) + '%'; this.gCh.firstElementChild.style.background = fire ? '#ff6a20' : '#fff4c8'; }
-    if (st.role === 'victim') { this.gTitle.textContent = 'GRABBED!'; this.gHint.textContent = ''; return; }
+    if (st.role === 'victim') { this.gTitle.textContent = 'GRABBED!'; this.gHint.innerHTML = pad ? '<b class="yb">Y</b> counter' : '<b>Q</b> / <b>Tab</b> counter'; return; }
     this.gTitle.textContent = { hold: `CHOKE HOLD  ${st.left.toFixed(1)}s`, punch: 'CHARGING…', spin: 'SPINNING…' }[st.mode] || '';
     this.gHint.innerHTML = st.mode !== 'hold' ? (st.mode === 'punch' ? 'release to punch' : '') : pad ? '<b>X</b> charged punch · <b>B</b> spin throw · <b>LS</b> ↑ forward drive' : '<b>X</b> charged punch · <b>E</b> spin throw · <b>W</b> forward drive';
+  }
+  // world-anchored Y prompt above the grabber's head (only while they are holding you)
+  counter(show, enemy, camera, dt) {
+    if (!this.cEl) { this.cEl = document.getElementById('counterY'); this.cv = null; }
+    if (!this.cEl) return;
+    let vis = false;
+    if (show) {
+      const head = enemy.anim?.B?.('head'), p = this.cv || (this.cv = enemy.pos.clone());
+      if (head) { enemy.rig.root.updateMatrixWorld(true); head.getWorldPosition(p); } else p.copy(enemy.pos).setY(enemy.pos.y + enemy.def.height);
+      p.y += 0.55 * enemy.def.height / 1.83;
+      p.project(camera);
+      if (p.z < 1 && Math.abs(p.x) < 1.2 && Math.abs(p.y) < 1.2) {
+        const x = THREE_clamp((p.x * 0.5 + 0.5) * innerWidth, 40, innerWidth - 40), y = THREE_clamp((-p.y * 0.5 + 0.5) * innerHeight, 70, innerHeight - 20);
+        this.cEl.style.left = x.toFixed(1) + 'px'; this.cEl.style.top = y.toFixed(1) + 'px'; vis = true;
+      }
+    }
+    const d = vis ? 'block' : 'none'; if (this.cEl.style.display !== d) this.cEl.style.display = d;
+    this.counterVisible = vis;
   }
   toggle() { this.visible = !this.visible; this.root.style.display = this.hint.style.display = this.visible ? 'block' : 'none'; }
   say(msg) { this.toast.textContent = msg; this.toast.style.opacity = 1; this.toastT = 2; }
@@ -38,7 +57,7 @@ export class HUD {
     this.charge.style.display = h.charge > 0 ? 'block' : 'none'; this.bar.style.width = (h.charge * 100) + '%';
     if (pad !== this.lastPad) { this.lastPad = pad;
       this.hint.innerHTML = pad
-        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> (hold) roar blast / eye beams · <b>LT</b> tackle · <b>X</b> dash punch · <b>RB</b> boost/sprint · <b>LS</b> (click) sonic boom → super speed while flying · <b>RS</b> (click) lock on · <b>A A</b> (double-tap while tumbling) recover · <b>LT</b> hit → choke grab · <b>LB</b> descend · <b>B</b> stop flying · <b>Y</b> switch hero · <b>View</b> HUD'
-        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> (hold) roar blast / eye beams · <b>Right click/R</b> tackle · <b>X/V</b> dash punch · <b>Shift</b> boost · <b>B</b> sonic boom (while flying) · <b>T/middle click</b> lock on · <b>Space Space</b> (tumbling) recover · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero · <b>H</b> HUD · <b>G</b> graphics'; }
+        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> (hold) roar blast / eye beams · <b>LT</b> tackle · <b>X</b> dash punch · <b>RB</b> boost/sprint · <b>LS</b> (click) sonic boom → super speed while flying · <b>RS</b> (click) lock on · <b>A A</b> (double-tap while tumbling) recover · <b>LT</b> hit → choke grab · <b>LB</b> descend · <b>B</b> stop flying · <b>Y</b> switch hero (while grabbed: counter) · <b>View</b> HUD'
+        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> (hold) roar blast / eye beams · <b>Right click/R</b> tackle · <b>X/V</b> dash punch · <b>Shift</b> boost · <b>B</b> sonic boom (while flying) · <b>T/middle click</b> lock on · <b>Space Space</b> (tumbling) recover · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero (while grabbed: counter) · <b>H</b> HUD · <b>G</b> graphics'; }
   }
 }

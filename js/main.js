@@ -116,20 +116,21 @@ function switchHero() {
 const lockPt = new THREE.Vector3();
 function combatFrame(dt, inp) {
   const P = heroes[idx], E = heroes[idx ^ 1];
-  const pFree = !P.ragdoll && !P.grabbedBy, eFree = !E.ragdoll && !E.grabbedBy;
+  const pFree = !P.ragdoll && !P.grabbedBy && !P.slammedBy, eFree = !E.ragdoll && !E.grabbedBy && !E.slammedBy;
   if (pFree) P.update(dt, P.ko ? NOINP : inp, cam, city);
   const aiInp = combat.aiInput(dt, E, P);
   if (eFree) E.update(dt, aiInp, combat.aiCam, city);
   combat.update(dt, P, E, P.ko ? null : inp, cam.forward);
   combat.updateLock(dt, P, E, inp);
   cam.lockTarget = combat.lockOn && !E.ko ? combat.chest(E, lockPt) : null;
-  if (P.ragdoll || P.grabbedBy) P.animate(dt, 0);
-  if (E.ragdoll || E.grabbedBy) E.animate(dt, 0);
+  if (P.ragdoll || P.grabbedBy || P.slammedBy) P.animate(dt, 0);
+  if (E.ragdoll || E.grabbedBy || E.slammedBy) E.animate(dt, 0);
   // KO -> respawn
   if (P.ko && (P.koT += dt) > 3.2) { combat.reset(P, P.pos.clone().setY(city.heightAt(P.pos.x, P.pos.z))); hud.say('Back on your feet'); }
   if (E.ko && (E.koT += dt) > 4) combat.respawnNear(E, P);
   hud.bars(P, E, combat.inCombat(P, E), dt);
   hud.grab(combat.grabState(P, E), input.state.hasPad, P.def.style === 'fire');
+  hud.counter(combat.canCounter(P) && E.grabbing === P, E, camera, dt); // Y prompt over the grabber's head, only while they hold you
 }
 const clock = new THREE.Clock();
 let paused = false;
@@ -145,7 +146,7 @@ function frame() {
   const h = heroes[idx];
   if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); heroes[idx ^ 1].animate(dt, 0); }
   else {
-    if (inp.switchPressed) switchHero();
+    if (inp.switchPressed && !heroes[idx].grabbedBy && heroes[idx].action?.type !== 'counter') switchHero(); // Y while grabbed = counter instead
     combatFrame(dt, inp); cam.update(dt, inp, heroes[idx], city);
   }
   step(dt, raw);

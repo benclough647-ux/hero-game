@@ -334,7 +334,8 @@ export async function preloadHeroModels(onProgress) {
 
 const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down']);
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
-const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch']);
+const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counter_kick', 'counter_slam']);
+export const MAX_HP = 400; // each hero's health (bars and HP numbers show /400)
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
 const _cq = new THREE.Quaternion(), _cp = new THREE.Quaternion(), _cd = new THREE.Quaternion(), _cv = new THREE.Vector3(), _cv2 = new THREE.Vector3(), _cf = new THREE.Vector3(), _cr = new THREE.Vector3(), _cu = new THREE.Vector3(), _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _c3 = new THREE.Vector3(), _c4 = new THREE.Vector3();
 // ---------- ragdoll joint layer ----------
@@ -512,7 +513,7 @@ export class Hero {
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
     // combat state
-    this.hp = 100; this.maxHp = 100; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0, recover: 0 };
+    this.hp = MAX_HP; this.maxHp = MAX_HP; this.invulnT = 0; this.slammedBy = null; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0, recover: 0 };
     this.ragdoll = null; this.grabbedBy = null; this.grabbing = null; this.ko = false; this.aim = V(0, 0, 1); this.shoulders = null;
     this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
     this.superSpeed = false; this.superT = 0; this.superIdle = 0; this.boomKick = 0; this.visibleFlag = true;
@@ -682,7 +683,8 @@ export class Hero {
       else if (has('fly_boost')) { const bz = this.boostBlend; tgt.fly_hover = 1 - fb; tgt.fly_fast = fb * (1 - bz); tgt.fly_boost = fb * bz; } // Tiger: hover -> cruise -> full burn
       else { tgt.fly_hover = 1 - fb; tgt.fly_fast = fb; }
       const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive';
-      if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
+      if (act && act.type === 'counter' && has(act.clip)) { over = act.clip; overW = 1; drive(act.clip, act.t); } // grab counter (kick / slam), flip included
+      else if (this.flip && has('crouch')) { over = 'crouch'; overW = 0.85; drive('crouch', 0.42); } // tucked during the backflip
       else if (this.grabbedBy && has('fall')) { over = 'fall'; overW = 0.35; }
       else if (hold) { over = null; }
       else if (act && act.beam) { over = null; } // eye beam: locomotion/flight base + additive upper-body clip
@@ -859,7 +861,7 @@ export class Hero {
   update(dt, inp, cam, city) {
     const d = this.def, fire = d.style === 'fire'; this.t += dt;
     const stun = this.knockT > 0; if (stun) { this.knockT -= dt; inp = NO_INP; }
-    else if (this.grabbing) inp = NO_INP; // choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
+    else if (this.grabbing || this.action?.type === 'counter') inp = NO_INP; // counter: scripted; choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
     const fwd = cam.flatForward, right = cam.right;
     const wish = V().addScaledVector(fwd, inp.moveY).addScaledVector(right, inp.moveX);
     const prevYaw = this.yaw;
@@ -1027,6 +1029,7 @@ export class Hero {
       r.body.rotation.x = fb * (fire ? Math.max(0.05, flyPitch - climb * 0.35) : flyPitch - climb * 0.7) * (1 - 0.75 * this.upright) + chargeLean + runLean + tackleLean;
       r.body.rotation.z = this.bank * (1 - this.upright);
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
+      if (this.slammedBy && this.slamPitch) { r.body.rotation.x = this.slamPitch; r.body.rotation.z = 0; } // swung over Tiger's head by the wrists (combat.slamCarry)
       r.body.rotation.y = 0;
       r.body.position.y = this.hipH;
       if (this.flip) { // recovery backflip: unwind the tumble, full backwards rotation, end upright

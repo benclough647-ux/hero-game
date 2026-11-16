@@ -20,6 +20,10 @@ export const EYE = { charge: 0.16, min: 0.35, max: 1.8, dps: 24, range: 300, hit
 // Tiger roar blast (player only): same push / damage / ragdoll as the eye beam, but a wide cone of fire from the mouth.
 // The cone radius at distance d is r0 + spread*d; anything whose body overlaps it is hit.
 export const ROAR = { charge: 0.24, min: 0.4, max: 1.8, dps: 24, range: 140, r0: 0.3, spread: 0.13, body: 0.7, snap: 0.86 };
+// grab counter (player only, Y while held in the rival's choke grab): Centurion double-foot kick / Tiger arm-grab overhead slam
+export const COUNTER = { invuln: 0.9,
+  kick: { dur: 0.9, hitAt: 0.25, flipAt: 0.32, flipDur: 0.55, dmg: 38, speed: 230, up: 0.22, push: 22 },
+  slam: { dur: 0.95, gripT: 0.12, liftT: 0.33, slamAt: 0.42, dmg: 24, down: 150, fwd: 8, radius: 1.25 } };
 export const DASH = { speed: 170, max: 34, free: 14, stop: 2.0, maxT: 0.32, assist: 32 };
 
 // screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
@@ -191,6 +195,7 @@ export class Combat {
 
   damage(target, amount, attacker, kind, extra = {}) {
     if (target.ko) return 0;
+    if (target.invulnT > 0) { this.stats.hits.push({ t: this.t, kind: 'blocked', amount: 0, target: target.key, attacker: attacker?.key, by: kind }); return 0; }
     amount = Math.round(clamp(amount, 1, 60));
     target.hp = Math.max(0, target.hp - amount); target.lastHitT = this.t; this.lastCombat = this.t;
     this.stats.hits.push({ t: this.t, kind, amount, target: target.key, attacker: attacker?.key, ...extra });
@@ -265,9 +270,12 @@ export class Combat {
     }
     for (const h of [player, enemy]) {
       for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - dt);
+      if (h.invulnT > 0) h.invulnT = Math.max(0, h.invulnT - dt);
       // the punch wind-up holds while the dash is still closing the gap, so the fist lands on arrival
       if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += dt; }
     }
+    // grab counter: Y while the rival holds you (player only: the AI never counters)
+    if (inp && inp.switchPressed && this.canCounter(player)) this.counter(player, player.grabbedBy);
     // player commands (locked on: always aim at / track the enemy)
     if (inp && !player.ko) {
       const fwd = camFwd.clone(), lock = this.lockTarget(enemy);
@@ -291,10 +299,12 @@ export class Combat {
     for (const h of [player, enemy]) {
       if (h.ragdoll) this.ragdollStep(dt, h);
       if (h.grabbedBy) this.carryStep(h.grabbedBy, h);
+      if (h.slammedBy) this.slamCarry(h.slammedBy, h);
     }
   }
   actionStep(dt, a, b) {
     const act = a.action; if (!act) return;
+    if (act.type === 'counter') { this.counterStep(dt, a, b, act); return; }
     const m = MOVES[act.type];
     if (act.type === 'blast' && act.beam) { this.eyeBeamStep(dt, a, b, act); return; }
     if (act.type === 'blast' && !act.done && act.t >= m.fireAt) { act.done = true; this.fireBlast(a, b); }
@@ -346,6 +356,7 @@ export class Combat {
     if (act.t >= act.dur && !a.grabbing) a.action = null;
   }
   grab(a, b) {
+    if (b.invulnT > 0 || b.slammedBy) return;
     const rel = t1.copy(a.vel).sub(b.vel).length();
     a.grabbing = b; b.grabbedBy = a; b.action = null; b.knockT = 0; b.state = 'air';
     const act = a.action; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
@@ -457,6 +468,73 @@ export class Combat {
         whooshSound(a.def.style === 'fire');
       }
     }
+  }
+  // ---- grab counter (player only) ----
+  canCounter(h) { const g = h.grabbedBy; return !!g && h === this.player && !h.ko && g.grabbing === h && h.action?.type !== 'counter'; }
+  counter(v, att) {
+    const style = v.def.style === 'fire' ? 'slam' : 'kick', C = COUNTER[style];
+    const F = V(Math.sin(att.yaw), 0, Math.cos(att.yaw)); // attacker's forward = from the attacker toward the victim
+    this.releaseGrab(att); att.action = null; att.knockT = 0; att.charge = 0;
+    v.grabbedBy = null; v.ragdoll = null; v.knockT = 0; v.flip = null;
+    v.yaw = Math.atan2(-F.x, -F.z); v.aim.copy(F).negate(); // face the grabber
+    v.state = 'fly'; v.vel.copy(att.vel);
+    v.action = { type: 'counter', style, clip: style === 'kick' ? 'counter_kick' : 'counter_slam', t: 0, dur: C.dur, done: false, target: att };
+    v.invulnT = COUNTER.invuln;
+    att.slammedBy = v; att.vel.set(0, 0, 0); att.state = 'air'; // the grabber is pinned (wrists caught / knees coming up) until the counter lands
+    this.fx.flash(this.chest(v, V()), v.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 40, 0.2); this.burst(this.chest(v, V()), v, 30, 8);
+    this.hud?.say(style === 'kick' ? 'COUNTER! Double kick' : 'COUNTER! Slam');
+    this.stats.hits.push({ t: this.t, kind: 'counter', amount: 0, target: att.key, attacker: v.key, style });
+    whooshSound(v.def.style === 'fire');
+  }
+  counterStep(dt, a, b, act) {
+    const C = COUNTER[act.style], tgt = act.target, fire = a.def.style === 'fire';
+    const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    if (act.style === 'kick') {
+      if (!act.done && act.t >= C.hitAt) { // both heels drive into the grabber's chest
+        act.done = true; tgt.slammedBy = null;
+        const dir = F.clone(); dir.y += C.up; dir.normalize();
+        const hp = this.chest(tgt, V()).addScaledVector(F, -0.3);
+        this.damage(tgt, C.dmg, a, 'counterKick', { speed: C.speed });
+        tgt.vel.copy(dir).multiplyScalar(C.speed / tgt.def.mass); this.startRagdoll(tgt, 13);
+        this.fx.shockwaveOriented?.(hp, dir, 0xfff2c8, 34, 0.55, 0.85);
+        this.fx.shockwave(hp.clone().setY(Math.max(0, hp.y - 1)), 0xe8e2d0, 26);
+        this.fx.flash(hp, 0xfff0c0, 170, 0.4); this.fx.dustBurst?.(hp, 40, 18);
+        this.burst(hp, a, 140, 28); this.shakeNear(hp, 0.9);
+        a.vel.copy(F).multiplyScalar(-C.push); a.vel.y = 10; // recoil back off the kick
+        if (a === this.player) a.fovKick = (a.fovKick || 0) + 12;
+        whooshSound(false);
+      }
+      if (act.done && !act.flipped && act.t >= C.flipAt) { act.flipped = true; a.flip = { t: 0, dur: C.flipDur, q0: new THREE.Quaternion() }; }
+    } else {
+      if (!act.done && act.t >= C.slamAt && tgt.slammedBy === a) { // hurl them straight down into the ground in front
+        act.done = true; tgt.slammedBy = null; tgt.slamPitch = 0;
+        const hp = this.chest(tgt, V());
+        this.damage(tgt, C.dmg, a, 'counterSlam', { speed: C.down });
+        tgt.vel.copy(F).multiplyScalar(C.fwd); tgt.vel.y = -C.down / tgt.def.mass; this.startRagdoll(tgt, 9);
+        tgt.ragdoll.slam = true;
+        this.fx.shockwaveOriented?.(hp, V(0, -1, 0), 0xff8a30, 26, 0.5, 0.8); this.fx.flash(hp, 0xff7020, 120, 0.3);
+        for (let i = 0; i < 70; i++) this.fx.fire.emit(hp, t4.set((Math.random() - .5) * 30, -20 - Math.random() * 50, (Math.random() - .5) * 30), 0.3 + Math.random() * 0.3, this.cFire0, this.cFire1);
+        this.shakeNear(hp, 0.7); whooshSound(true);
+        if (a === this.player) a.fovKick = (a.fovKick || 0) + 8;
+      }
+    }
+    if (act.t >= act.dur) { if (tgt.slammedBy === a) { tgt.slammedBy = null; tgt.slamPitch = 0; } a.action = null; }
+  }
+  // Tiger's slam: the grabber is held by the wrists and swung from in front of Tiger up over his head
+  slamCarry(a, v) {
+    const act = a.action; if (!act || act.type !== 'counter') { v.slammedBy = null; return; }
+    if (act.style === 'kick') { v.vel.set(0, 0, 0); v.state = 'air'; v.knockT = 0.2; v.action = null; v.yaw = a.yaw + Math.PI; return; } // stunned in place as the knees come up
+    const C = COUNTER.slam, F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw)), U = V(0, 1, 0);
+    // arc angle: 0 = in front at chest height, ~1.6 = straight overhead; then whipped back down to the front (-0.55 = near the ground)
+    const u = clamp((act.t - C.gripT) / (C.liftT - C.gripT), 0, 1), e = u * u * (3 - 2 * u);
+    const w = clamp((act.t - C.liftT) / (C.slamAt - C.liftT), 0, 1), ew = w * w;
+    const th = act.t < C.liftT ? e * 1.6 : 1.6 - ew * 2.15, R = C.radius * (1 + 0.35 * ew);
+    const pivot = this.chest(a, t1).addScaledVector(U, 0.35);
+    const chest = pivot.addScaledVector(F, Math.cos(th) * R * 1.15).addScaledVector(U, Math.sin(th) * R * 1.6);
+    const fl = this.city.heightAt(chest.x, chest.z, 0.5); if (chest.y < fl + 0.5) chest.y = fl + 0.5;
+    v.pos.copy(chest).addScaledVector(U, -CHEST * v.def.height / 1.83);
+    v.vel.copy(a.vel); v.state = 'air'; v.knockT = 0.2; v.action = null; v.yaw = a.yaw + Math.PI;
+    v.slamPitch = -(e * 1.6 + ew * 2.15) * 0.85; // tipped backwards over the top and driven down back-first
   }
   breakFree(a, b) {
     const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));

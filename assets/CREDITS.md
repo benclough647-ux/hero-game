@@ -9,6 +9,7 @@ Temper Tiger and Centurion are Ben's original characters. The meshes were genera
   - Licence: **CC0 1.0** (public domain). Author: Quaternius (https://quaternius.com/packs/universalanimationlibrary.html).
   - Fetched from the glTF mirror of the free itch.io release at https://github.com/J-Ponzo/gltf-universal-animation-library, which is also CC0.
 - **Hand-keyframed clips:** `fly_hover`, `fly_fast` (Superman pose), `tackle`, `blast`, `fall`, `down` and `getup` were keyframed procedurally for this game (see `tools/rig/anim.py`).
+- **Grab-counter clips:** `counter_kick` (Centurion) and `counter_slam` (Tiger) were keyframed for this game on the same rigs (see `tools/rig/counter.py`, run after `anim.py`/face builds and before `export.py`).
 - **Secondary motion:** cape and tail motion is keyframed per clip.
 
 The build scripts are in `tools/rig/` (run with `blender -b --python <script> -- tiger|cent`).
