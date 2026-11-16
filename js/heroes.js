@@ -685,7 +685,7 @@ export class Hero {
     const feet = [attach(B('toe.L') || B('foot.L'), 0, 0, 0, 'footL'), attach(B('toe.R') || B('foot.R'), 0, 0, 0, 'footR')];
     this.rig = { root, squash, body, model, lod: null, lodObjects: [scene], mohawks: collectMohawks(scene), hands: fists, feet, arms: [], legs: [], head: B('head') || model, cape: null };
     this.fists = fists; this.shoulders = null;
-    this.anim = { mixer, actions, w, B, lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
+    this.anim = { mixer, actions, w, B, bones: [...new Set(Object.values(bones))], lod0, lod1, upperArmR: B('upper_arm.R'), lowNow: null };
     if (this.def.style === 'fire') { // flight thrusters: fists (aimed along the forearms) + boot soles (aimed along the shins)
       const sole = s => attach(B('foot.' + s) || B('toe.' + s), 0, 0.02 * k, 0, 'sole' + s);
       this.jetSrc = [[fists[0], B('forearm.R')], [fists[1], B('forearm.L')], [sole('L'), B('shin.L')], [sole('R'), B('shin.R')]];
@@ -758,6 +758,11 @@ export class Hero {
       const [l0, lp] = A.beamLoop, bt = act && act.beam ? act.t : l0 + lp; A.beamAct.time = bt < l0 ? bt : l0 + ((bt - l0) % lp);
     }
     A.mixer.update(dt);
+    // three's PropertyMixer only writes a bone when the blended clip value CHANGES, so a held pose (driven clip at a fixed
+    // time, end of a clamped clip) leaves last frame's procedural edits (wrist flex, arm aim, choke, ragdoll offsets) in the
+    // bone and they compound every frame -> spinning hands / twisting arms. Restore the clip pose for bones the mixer skipped.
+    const BQ = A.boneBase || (A.boneBase = A.bones.map(b => ({ b, base: b.quaternion.clone(), last: new THREE.Quaternion(NaN, NaN, NaN, NaN) })));
+    if (!Hero.debugOld) for (const e of BQ) { if (e.b.quaternion.equals(e.last)) e.b.quaternion.copy(e.base); else e.base.copy(e.b.quaternion); } // Hero.debugOld: tests reproduce the old bugs
     if (A.rag) this.ragdollJoints(dt, A.rag);
     this.capeFlutter(dt, rd);
     if (A.beamAct && A.beamW > 0.01) this.trackHead(A.beamW * (act?.beam && act.t < A.beamLoop[0] ? 0.2 : 1)); // light tracking during the wind-up so the head can rear back
@@ -773,12 +778,28 @@ export class Hero {
       const qw = new THREE.Quaternion().setFromAxisAngle(_ax, -THREE.MathUtils.clamp(pitch, -1.3, 1.3) * k);
       bone.quaternion.premultiply(_q2.clone().invert().multiply(qw).multiply(_q2));
     }
+    if (!rd && this.lungeW > 0.01) this.supermanPose(this.lungeW);
     if (A.hand) this.handLayer(dt, rd, act, tgt, sum);
+    for (const e of BQ) e.last.copy(e.b.quaternion); // what we left in each bone (compared after the next mixer update)
     // LOD: swap to the decimated meshes (same skeleton) when the camera is far
     if (A.lod1.length) {
       const cam = Hero.viewer; const d = cam ? cam.position.distanceTo(this.pos) : 0;
       const low = this.qualityName === 'Low' ? d > 7 : d > 16;
       if (low !== A.lowNow) { A.lowNow = low; for (const m of A.lod0) m.visible = !low; for (const m of A.lod1) m.visible = low; }
+    }
+  }
+  // Superman punch pose (world-space aims, so it works at any body pitch): punching fist driven forward along the aim,
+  // other arm swept back by the hip, legs together trailing behind, head up toward the target
+  supermanPose(w) {
+    const B = this.anim.B, a = _c1.copy(this.aim).normalize(); this.rig.root.updateMatrixWorld(true);
+    const Rt = _cr.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw)), U = _cu.set(0, 1, 0);
+    const back = _c2.copy(a).multiplyScalar(-1);
+    this.aimBone(B('upper_arm.R'), _c3.copy(a).addScaledVector(U, 0.08), w); this.aimBone(B('forearm.R'), a, w); this.aimBone(B('hand.R'), a, w);
+    const arm = _c3.copy(back).multiplyScalar(0.8).addScaledVector(Rt, -0.35).addScaledVector(U, -0.25);
+    this.aimBone(B('upper_arm.L'), arm, w); this.aimBone(B('forearm.L'), arm, w);
+    for (const [sd, k] of [['L', -1], ['R', 1]]) {
+      const leg = _c3.copy(back).addScaledVector(Rt, 0.04 * k).addScaledVector(U, -0.12);
+      this.aimBone(B('thigh.' + sd), leg, w); this.aimBone(B('shin.' + sd), _c4.copy(back).addScaledVector(U, -0.05 + (k < 0 ? 0.12 : 0)), w);
     }
   }
   // finger layer (after the clips, choke and arm aim): blends hand presets by state.
@@ -794,7 +815,7 @@ export class Hero {
     else if (strike || this.grabbing || this.holdW > 0.3) want = 'fist';
     else if (act && act.beam) want = fire ? 'claw' : 'fist';
     else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? 'knife' : 'relaxed');
-    else if (this.state === 'air') want = fire ? 'open' : 'relaxed';
+    else if (this.state === 'air') want = fire ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying)
     else want = fire ? 'fist' : 'relaxed';
     const k = Math.min(1, dt * (want === 'fist' ? 18 : 9));
     for (const n in W) W[n] += ((n === want ? 1 : 0) - W[n]) * k;
@@ -908,9 +929,14 @@ export class Hero {
     const B = A.B, act = this.action, t = this.t;
     const F = _cf.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)), Rt = _cr.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw)), U = _cu.set(0, 1, 0);
     const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive' && this.grabbing;
-    this.holdW = THREE.MathUtils.clamp((this.holdW || 0) + (hold || (act && act.mode === 'punch' && act.strikeT !== undefined) ? dt * 7 : -dt * 5), 0, 1);
-    const att = this.holdW;
-    if (att > 0) {
+    this.holdW = THREE.MathUtils.clamp((this.holdW || 0) + (hold || (act && act.mode === 'punch' && act.strikeT !== undefined) ? dt * 7 : (Hero.debugOld ? -dt * 5 : -dt * 2.5)), 0, 1);
+    const att = Hero.debugOld ? this.holdW : this.holdW * this.holdW * (3 - 2 * this.holdW); // smoothstep: no lurch at either end of the blend
+    const live = hold || (act && act.type === 'tackle' && act.mode === 'punch');
+    if (att > 0 && !live && this._chokeLast && !Hero.debugOld) { // fading out after the hold / charged punch ends: ease out of the LAST pose,
+      const L = this._chokeLast; this.rig.root.updateMatrixWorld(true); // not the default grip (that snapped the arms ~145 deg)
+      this.aimBone(B('upper_arm.R'), L.grip, att); this.aimBone(B('forearm.R'), L.grip, att); this.aimBone(B('hand.R'), L.grip, att * 0.8);
+      this.aimBone(B('upper_arm.L'), L.up, att); this.aimBone(B('forearm.L'), L.fo, att);
+    } else if (att > 0) {
       this.rig.root.updateMatrixWorld(true);
       const spin = act?.mode === 'spin';
       // gripping arm (right): extended up and forward at the victim's throat
@@ -922,6 +948,8 @@ export class Hero {
       const fo = _c3.copy(F).multiplyScalar(0.45).addScaledVector(U, 0.85).addScaledVector(Rt, 0.12);
       if (s > 0) { const st = _c4.copy(F).addScaledVector(U, 0.3).addScaledVector(Rt, 0.18).normalize(); up.normalize().lerp(st, s); fo.normalize().lerp(st, s); }
       this.aimBone(B('upper_arm.L'), up, att); this.aimBone(B('forearm.L'), fo, att);
+      const L = this._chokeLast || (this._chokeLast = { grip: new THREE.Vector3(), up: new THREE.Vector3(), fo: new THREE.Vector3() });
+      L.grip.copy(grip); L.up.copy(up); L.fo.copy(fo);
       const sp = B('spine'); if (sp && c > 0) sp.quaternion.multiply(_cd.setFromAxisAngle(_cv.set(0, 1, 0), -0.35 * c * (1 - s) + 0.25 * s)); // twist into the punch
     }
     // victim dangling by the throat
@@ -1139,6 +1167,11 @@ export class Hero {
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       if (this.slammedBy && this.slamPitch) { r.body.rotation.x = this.slamPitch; r.body.rotation.z = 0; } // swung over Tiger's head by the wrists (combat.slamCarry)
       r.body.rotation.y = 0;
+      // Superman punch lunge: stretch out along the dash (pitch the body toward the aim), eased in/out
+      const lng = act && act.type === 'punch' && act.lunge && !act.done ? 1 : 0;
+      this.lungeW = (this.lungeW || 0) + (lng - (this.lungeW || 0)) * Math.min(1, dt * (lng ? 14 : 7));
+      if (this.lungeW > 0.001) { const lp = THREE.MathUtils.clamp(Math.acos(THREE.MathUtils.clamp(this.aim.y, -1, 1)), 0.3, this.state === 'ground' ? 1.2 : 1.5);
+        r.body.rotation.x += (lp - r.body.rotation.x) * this.lungeW; r.body.rotation.z *= 1 - this.lungeW; }
       const bz = r.body.rotation.z, bx = r.body.rotation.x; // bank: roll about the travel axis AFTER the pitch (Rz * Rx), so a near-horizontal Centurion rolls instead of swivelling
       if (Math.abs(bz) > 1e-4 && !this.flip) r.body.quaternion.setFromAxisAngle(_ax.set(0, 0, 1), bz).multiply(_q2.setFromAxisAngle(_ax.set(1, 0, 0), bx));
       r.body.position.y = this.hipH;

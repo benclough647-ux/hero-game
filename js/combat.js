@@ -24,7 +24,12 @@ export const ROAR = { charge: 0.24, min: 0.4, max: 1.8, dps: 24, range: 140, r0:
 export const COUNTER = { invuln: 0.9,
   kick: { dur: 0.9, hitAt: 0.25, flipAt: 0.32, flipDur: 0.55, dmg: 38, speed: 230, up: 0.22, push: 22 },
   slam: { dur: 0.95, gripT: 0.12, liftT: 0.33, slamAt: 0.42, dmg: 24, down: 150, fwd: 8, radius: 1.25 } };
-export const DASH = { speed: 170, max: 34, free: 14, stop: 2.0, maxT: 0.32, assist: 32 };
+// X punch = lock-on lunge "Superman punch": dash at the rival (nearest in front within assist range/cone even without lock-on;
+// locked on = range up to max and perfect homing, unlocked = softer steering), lead a moving target, end in a heavy punch.
+// Range is capped (no teleport): a target beyond max gets a max-length lunge toward it. Lunges over superMin m use the
+// stretched Superman pose and the heavy impact.
+export const DASH = { speed: 230, max: 90, free: 14, stop: 1.8, maxT: 0.6, assist: 75, cone: 0.55, lead: 0.5, softTurn: 11, superMin: 7,
+  impact: { kb: 120, kbSpeed: 0.55, up: 0.32, spin: 14, dmgBonus: 10 } };
 
 // screen-facing lock-on reticle: spinning outer brackets + inward chevrons, drawn on top of everything
 function makeReticle() {
@@ -166,7 +171,8 @@ export class Combat {
     else if (h.state === 'ground') { h.aim.y = 0; if (h.aim.lengthSq() < 1e-4) h.aim.set(Math.sin(h.yaw), 0, Math.cos(h.yaw)); h.aim.normalize(); }
     if (dist < 0.8) { h.vel.addScaledVector(h.aim, 10); return; } // already in reach: plain punch
     const act = h.action;
-    act.dash = { left: dist, t: 0, speed: DASH.speed, cap: DASH.speed, used: 0, skip: true, pre: Math.max(0, h.vel.dot(h.aim)) }; act.dashed = true; act.dashPre = act.dash.pre;
+    act.dash = { left: dist, t: 0, speed: DASH.speed, cap: DASH.speed, used: 0, trav: 0, skip: true, pre: Math.max(0, h.vel.dot(h.aim)) }; act.dashed = true; act.dashPre = act.dash.pre;
+    act.lunge = !!target && dist > DASH.superMin; // Superman pose + heavy impact
     const fire = h.def.style === 'fire', c = this.chest(h, V());
     this.fx.shockwaveOriented?.(c.clone().addScaledVector(h.aim, -0.5), h.aim, fire ? 0xff8a30 : 0xe8f0ff, 7, 0.35, 0.7);
     this.burst(c.clone().addScaledVector(h.aim, 1.2), h, 10, 6);
@@ -177,10 +183,12 @@ export class Combat {
   dashStep(dt, a, act) {
     const ds = act.dash; ds.t += dt;
     const tgt = act.target && !act.target.ko ? act.target : null;
-    if (ds.skip) ds.skip = false; else ds.left -= a.vel.length() * dt; // (the start frame hasn't moved yet)
-    if (tgt) { // home in; the last step is capped so we arrive exactly at striking distance
-      const to = this.chest(tgt, t1).sub(this.chest(a, t2)); const d = to.length(); if (d > 1e-3) a.aim.copy(to.divideScalar(d));
-      if (d < DASH.stop + 0.3) ds.left = 0; else ds.cap = (d - DASH.stop) / dt;
+    if (ds.skip) ds.skip = false; else { const st = a.vel.length() * dt; ds.left -= st; ds.trav += st; } // (the start frame hasn't moved yet)
+    if (tgt) { // home in, leading a moving target; the last step is capped so we arrive exactly at striking distance
+      const to = this.chest(tgt, t1).sub(this.chest(a, t2)); const d = to.length();
+      to.addScaledVector(tgt.vel, clamp(d / DASH.speed, 0, 0.4) * DASH.lead);
+      const dl = to.length(); if (dl > 1e-3) { to.divideScalar(dl); if (act.soft) a.aim.lerp(to, Math.min(1, dt * DASH.softTurn)).normalize(); else a.aim.copy(to); }
+      if (d < DASH.stop + 0.3) ds.left = 0; else { ds.cap = (d - DASH.stop) / dt; ds.left = Math.min(DASH.max - ds.trav, d - DASH.stop); } // range budget (no teleport)
     } else ds.cap = Math.max(0, ds.left) / dt;
     const fire = a.def.style === 'fire', P = fire ? this.fx.fire : this.fx.spark, c0 = fire ? this.cFire0 : this.cGold0, c1 = fire ? this.cFire1 : this.cGold1;
     const c = this.chest(a, t3);
@@ -283,7 +291,9 @@ export class Combat {
       if (inp.blastPressed) this.start(player, 'blast', lock ? toE() : this.aimAt(player, enemy, fwd, 0.8));
       else if (inp.punchPressed) {
         if (lock) this.start(player, 'punch', toE(), enemy);
-        else { const a = this.aimAt(player, enemy, fwd, 0.8, DASH.assist); const assist = !enemy.ko && (a.dot(fwd) < 0.9999 || this.chest(enemy, V()).distanceTo(this.chest(player, V())) < 5); this.start(player, 'punch', a, assist ? enemy : null); }
+        else { // aim assist: lunge at the rival if roughly in front and in range, with softer steering than lock-on
+          const a = this.aimAt(player, enemy, fwd, DASH.cone, DASH.assist); const assist = !enemy.ko && (a.dot(fwd) < 0.9999 || this.chest(enemy, V()).distanceTo(this.chest(player, V())) < 5);
+          if (this.start(player, 'punch', a, assist ? enemy : null) && assist) player.action.soft = true; }
       }
       else if (inp.tacklePressed) {
         if (lock) this.start(player, 'tackle', toE(), enemy);
@@ -580,11 +590,20 @@ export class Combat {
     to.normalize(); if (to.dot(a.aim) < 0.25 && d > 2.2) return false;
     const rel = t4.copy(a.vel).sub(b.vel).dot(to);
     const act = a.action; // a dash punch: count ~30% of the dash plus the momentum you already had (not the full 170 m/s ram)
-    const sp = act?.dashed ? Math.max(0, rel, act.dashPre + DASH.speed * 0.3 - b.vel.dot(to)) : Math.max(0, rel);
-    const dmg = this.damage(b, 9 + 0.24 * sp, a, 'punch', { speed: sp });
+    const dbase = act?.dashed ? act.dashPre + DASH.speed * 0.3 : 0; // (lunge hits mid-dash would otherwise count the full 230 m/s)
+    const sp = act?.dashed ? clamp(Math.max(rel, dbase - b.vel.dot(to)), 0, dbase + 20) : Math.max(0, rel);
+    const L = act?.lunge ? DASH.impact : null, fire = a.def.style === 'fire';
+    const dmg = this.damage(b, 9 + 0.24 * sp + (L ? L.dmgBonus : 0), a, 'punch', { speed: sp, lunge: !!L });
     const dir = to.clone(); dir.y = Math.max(dir.y, 0);
-    this.knockback(b, dir, 48 + 0.5 * sp, 0.3, true, 10);
+    if (L) this.knockback(b, dir, L.kb + L.kbSpeed * sp, L.up, true, L.spin); else this.knockback(b, dir, 48 + 0.5 * sp, 0.3, true, 10);
     const hp = cb.clone().addScaledVector(to, -0.4);
+    if (L) { // Superman punch impact: oriented shock ring + ground ring, big flash, debris burst, shake, FOV punch
+      this.fx.shockwaveOriented?.(hp, to, fire ? 0xff8a30 : 0xfff2c8, 26, 0.5, 0.9);
+      if (hp.y < 4) this.fx.shockwave(hp.clone().setY(0.1), fire ? 0xff7020 : 0xe8e2d0, 22);
+      this.fx.flash(hp, fire ? 0xff7020 : 0xfff0c0, 140, 0.35); this.burst(hp, a, 140, 26);
+      if (fire) for (let i = 0; i < 60; i++) this.fx.fire.emit(hp, t4.copy(to).multiplyScalar(20 + Math.random() * 40).add(t1.set((Math.random() - .5) * 18, (Math.random() - .5) * 18, (Math.random() - .5) * 18)), 0.3 + Math.random() * 0.3, this.cFire0, this.cFire1);
+      this.shakeNear(hp, 0.9); if (a.isPlayer) a.fovKick = (a.fovKick || 0) + 8;
+    }
     this.fx.shockwave(hp, a.def.style === 'fire' ? 0xff8a30 : 0xfff2c8, 6);
     this.fx.flash(hp, a.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 45, 0.25);
     this.burst(hp, a, 60, 16);

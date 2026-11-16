@@ -19,6 +19,30 @@ AW = ao.matrix_world; BW = body.matrix_world; BWi = BW.inverted()
 FINGERS = ['index', 'middle', 'ring', 'pinky']
 info = {}
 me = body.data
+# ---- shrink oversized hand blobs to the design proportions (Tiger's TRELLIS mittens came out ~2.5x a forearm wide):
+# hand width target = HAND_K x the forearm width at the wrist; scaled about the wrist, blended by hand weight (no seam)
+HAND_K = 0.85 if TIGER else 0.0
+def sect(gname, pred, R, O):
+    gi = body.vertex_groups[gname].index
+    P = [R.inverted() @ ((BW @ v.co) - O) for v in me.vertices if any(g.group == gi and g.weight > 0.45 for g in v.groups)]
+    return np.array([list(p) for p in P if pred(p)])
+for sd in 'LR':
+    if not HAND_K: break
+    hb = arm.bones[f'hand.{sd}']; M = AW @ hb.matrix_local; R = M.to_3x3().normalized(); O = M.translation
+    fb = arm.bones[f'forearm.{sd}']
+    F = sect(f'forearm.{sd}', lambda p: -0.3 * fb.length < p.y < 0.0, R, O)  # last 30% of the forearm, in hand space
+    Hh = sect(f'hand.{sd}', lambda p: True, R, O)
+    fw = float(np.ptp(F[:, 0])); fz = float(np.ptp(F[:, 2])); hw_ = float(np.ptp(Hh[:, 0])); hz = float(np.ptp(Hh[:, 2]))
+    k = min(1.0, HAND_K * max(fw, fz) / max(hw_, hz))
+    gi = body.vertex_groups[f'hand.{sd}'].index
+    n = 0
+    for v in me.vertices:
+        w = sum(g.weight for g in v.groups if g.group == gi)
+        if w <= 0.02: continue
+        p = R.inverted() @ ((BW @ v.co) - O); s_ = 1 + (k - 1) * min(1.0, w / 0.8)
+        p = Vector((p.x * s_, p.y * (1 + (s_ - 1) * 0.85), p.z * s_))
+        v.co = BWi @ (O + R @ p); n += 1
+    print('SHRINK', sd, 'forearm', round(fw, 3), round(fz, 3), 'hand', round(hw_, 3), round(hz, 3), 'scale', round(k, 3), 'verts', n)
 for sd in 'LR':
     hb = arm.bones[f'hand.{sd}']; M = AW @ hb.matrix_local; R = M.to_3x3().normalized(); O = M.translation
     gi = body.vertex_groups[f'hand.{sd}'].index
