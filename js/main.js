@@ -15,10 +15,11 @@ import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
 import { QualityManager } from './quality.js';
 import { Combat } from './combat.js';
+import { InkGradePass, toonifyObject, OUTLINE_RES } from './toon.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: /shot/.test(location.search) });
 renderer.setSize(innerWidth, innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.75;
+renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.9;
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
@@ -36,13 +37,20 @@ heroes[0].pos.set(-HALF + 20 * BLOCK + 9, 0, -HALF + 22 * BLOCK + 9);
 heroes[1].pos.set(-HALF + 20 * BLOCK + 9 + 40, 0, -HALF + 22 * BLOCK + 9); heroes[1].yaw = -Math.PI / 2;
 const input = new Input(renderer.domElement), cam = new ThirdPersonCamera(camera), hud = new HUD();
 const combat = new Combat(scene, fx, city, cam, hud);
+// anime look: every remaining PBR surface of the map (ground, parks, trees, bridges, piers, landmarks, traffic) -> cel shading.
+// Heroes convert themselves when their models load; effects / water / sky keep their own shaders.
+{ const skip = new Set(); for (const h of heroes) h.rig.root.traverse(o => skip.add(o)); for (const w of [...Object.values(world.waters), world.cheapWater]) skip.add(w);
+  toonifyObject(scene, undefined, o => !skip.has(o)); }
 Hero.onCrash = (p, a) => combat.shakeNear(p, a);
 const NOINP = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, boost: 0, descend: 0 };
 
 // post-processing: HDR render -> subtle bloom -> ACES tone map + sRGB
+// (the scene render keeps its depth so the ink pass can find silhouettes and creases)
 const composer = new EffectComposer(renderer);
+for (const rt of [composer.renderTarget1, composer.renderTarget2]) { rt.depthTexture = new THREE.DepthTexture(innerWidth, innerHeight); rt.depthTexture.type = THREE.UnsignedIntType; }
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.22, 0.5, 1.0); composer.addPass(bloom);
+const ink = new InkGradePass(camera); composer.addPass(ink);
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.3, 0.45, 0.95); composer.addPass(bloom);
 composer.addPass(new OutputPass());
 let usePost = true, view = 1700;
 function resize() {
@@ -50,6 +58,7 @@ function resize() {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight);
   bloom.setSize(innerWidth * pr / 2, innerHeight * pr / 2);
+  OUTLINE_RES.value.set(innerWidth * pr, innerHeight * pr);
 }
 let quality = null;
 quality = new QualityManager(q => {
