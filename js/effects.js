@@ -122,12 +122,12 @@ export class Effects {
   // Sonic boom: vapour cone around the hero, perpendicular shock rings, radial vapour (and fire for Tiger), flash
   sonicBoom(pos, dir, { fire = false, follow = null } = {}) {
     const d = dir.clone().normalize();
-    const mat = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: fire ? 0xffd2a0 : 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
+    const mat = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: fire ? 0xff9a58 : 0xffffff, transparent: true, opacity: fire ? 0.7 : 0.85, side: THREE.DoubleSide, depthWrite: false });
     const cone = new THREE.Mesh(this.coneGeo, mat); cone.frustumCulled = false;
     cone.quaternion.setFromUnitVectors(V.set(0, -1, 0), d.clone().negate()); // apex leads, rim trails behind
     cone.position.copy(pos); this.scene.add(cone);
     this.booms.push({ m: cone, t: 0, dur: 0.75, d, follow, off: 2.2 });
-    if (fire) { const fm = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: new THREE.Color(4, 1.4, 0.25), transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
+    if (fire) { const fm = new THREE.MeshBasicMaterial({ map: this.vaporTex, color: new THREE.Color(2.6, 0.75, 0.1), transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
       const fc = new THREE.Mesh(this.coneGeo, fm); fc.frustumCulled = false; fc.quaternion.copy(cone.quaternion); fc.position.copy(pos); this.scene.add(fc);
       this.booms.push({ m: fc, t: 0, dur: 0.6, d, follow, off: 1.4, k: 0.8 }); }
     this.shockwaveOriented(pos, d, fire ? 0xffb070 : 0xffffff, 70, 0.7, 0.8);
@@ -141,6 +141,27 @@ export class Effects {
       if (fire) this.fire.emit(P, V.multiplyScalar(0.8), 0.35 + Math.random() * 0.4, f0, f1);
       else if (i % 2) this.spark.emit(P, V.multiplyScalar(0.7), 0.2 + Math.random() * 0.2, c0, c1); }
     this.flash(pos, fire ? 0xff8030 : 0xdde8ff, 90, 0.4);
+  }
+  // Tiger's super-speed ignition: expanding fireball, fire rings, flying embers, smoke and a big flash
+  fireExplosion(pos, dir, follow = null) {
+    const d = dir.clone().normalize();
+    if (!this.fbGeo) this.fbGeo = new THREE.SphereGeometry(1, 24, 16);
+    for (const [col, dur, R, op] of [[new THREE.Color(2.4, 0.62, 0.07), 0.55, 9, 0.85], [new THREE.Color(1.5, 0.22, 0.02), 0.85, 14, 0.55]]) {
+      const m = new THREE.Mesh(this.fbGeo, new THREE.MeshBasicMaterial({ map: this.vaporTex, color: col, transparent: true, opacity: op, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+      m.position.copy(pos); m.frustumCulled = false; this.scene.add(m); this.fireballs = this.fireballs || []; this.fireballs.push({ m, t: 0, dur, R, op, follow, off: pos.clone().sub(follow || pos) });
+    }
+    this.shockwaveOriented(pos, d, 0xff7a20, 85, 0.8, 0.9);
+    this.shockwaveOriented(P.copy(pos).addScaledVector(d, -3), d, 0xffc040, 55, 0.6, 0.8);
+    this.shockwave(P.copy(pos).setY(pos.y - 1.1), 0xff6010, 45);
+    const f0 = new THREE.Color(3.2, 1.1, 0.15), f1 = new THREE.Color(1.6, 0.16, 0.02), e0 = new THREE.Color(4, 1.3, 0.2), e1 = new THREE.Color(1.2, 0.12, 0.01), s0 = new THREE.Color(0x4a3a30), s1 = new THREE.Color(0x201a16);
+    for (let i = 0; i < 700; i++) { // fireball body
+      V.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize().multiplyScalar(20 + Math.random() * 45);
+      this.fire.emit(pos, V, 0.35 + Math.random() * 0.5, f0, f1); }
+    for (let i = 0; i < 260; i++) { // embers flung far, with long life
+      V.set(Math.random() * 2 - 1, Math.random() * 1.6 - 0.4, Math.random() * 2 - 1).normalize().multiplyScalar(60 + Math.random() * 90).addScaledVector(d, -20);
+      this.spark.emit(pos, V, 0.6 + Math.random() * 0.9, e0, e1); }
+    for (let i = 0; i < 70; i++) { V.set(Math.random() * 2 - 1, Math.random() * 1.2, Math.random() * 2 - 1).normalize().multiplyScalar(10 + Math.random() * 18); this.dust.emit(pos, V, 1.2 + Math.random() * 1.2, s0, s1); }
+    this.flash(pos, 0xff5a10, 140, 0.6);
   }
   speedLines(dt, center, vel, on, fire) { this.streakTint.setRGB(fire ? 1.8 : 1.4, fire ? 1.1 : 1.5, fire ? 0.6 : 1.7); this.streaks.update(dt, center, vel, on ? 1 : 0, this.streakTint); }
   dustBurst(p, n = 60, speed = 25) {
@@ -189,6 +210,10 @@ export class Effects {
         const rel = P.subVectors(this.viewer.position, b.m.position), along = -rel.dot(b.d), radial = rel.addScaledVector(b.d, along).length();
         if (along > 0 && along < l && radial < r * along / l + 1) op *= 0.3; }
       b.m.material.opacity = op;
+      if (b.t >= 1) { this.scene.remove(b.m); b.m.material.dispose(); return false; } return true; });
+    if (this.fireballs) this.fireballs = this.fireballs.filter(b => { b.t += dt / b.dur; const e = 1 - Math.pow(1 - Math.min(1, b.t), 3);
+      if (b.follow && b.t < 0.3) b.m.position.copy(b.follow).add(b.off);
+      b.m.scale.setScalar(1 + b.R * e); b.m.material.opacity = b.op * Math.pow(1 - Math.min(1, b.t), 1.6);
       if (b.t >= 1) { this.scene.remove(b.m); b.m.material.dispose(); return false; } return true; });
     this.rings = this.rings.filter(r => { r.t += dt / (r.dur || 0.6); const s = 1 + r.t * r.maxR; r.m.scale.set(s, 1, s); r.m.material.opacity = (r.op || 0.6) * (1 - r.t);
       if (r.t >= 1) { this.scene.remove(r.m); r.m.material.dispose(); return false; } return true; });

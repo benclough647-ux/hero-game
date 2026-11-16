@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { sonicBoomSound, jetSound } from './audio.js';
+import { sonicBoomSound, jetSound, fireBoomSound } from './audio.js';
 // Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
 // and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -168,7 +168,20 @@ export const HERO_DEFS = {
 };
 
 // Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
-const SUPER_MULT = 1.9; // was 2.5 (800 m/s); Ben: "a little slower" -> 608 m/s
+// Flight banking (rad): max roll ~20 deg cruising, ~27 deg at boost speed
+// cape flutter (rad): amplitude a0 hovering -> a0+a1 at boost speed (+a2 beyond), frequency f0 -> f0+f1 Hz
+export const CAPE = { a0: 0.05, a1: 0.2, a2: 0.08, f0: 1.1, f1: 4.2 };
+// finger layer presets (radians): prox/dist = knuckle / finger curl toward the palm, spread = fan, thumb = thumb curl,
+// wrist = hand flex (negative = bent back, palm facing away like a thruster)
+export const HAND_POSES = {
+  fist:    { prox: 1.5, dist: 1.6, spread: 0, thumb: 0.95, wrist: 0 },
+  open:    { prox: -0.12, dist: -0.06, spread: 0.24, thumb: -0.3, wrist: -0.85 }, // Tiger flying: fingers splayed, palms pushed back (Endeavor)
+  knife:   { prox: 0.02, dist: 0, spread: -0.03, thumb: 0.3, wrist: 0 },         // Centurion flying: flat blade hands, fingers together
+  relaxed: { prox: 0.4, dist: 0.5, spread: 0.04, thumb: 0.3, wrist: 0 },
+  claw:    { prox: 0.55, dist: 0.95, spread: 0.28, thumb: 0.45, wrist: -0.25 },
+};
+export const BANK = { gain: 0.32, max: 0.35, boostExtra: 0.12, dead: 0.04, rate: 4 };
+const SUPER_MULT = 1.45; // 2.5 (800 m/s) -> 1.9 (608) -> 1.45: Ben "slow it by half" = half the bonus over boost -> 464 m/s (boost 320)
 // Tiger's flight jets: an open flaring plume (narrow nozzle at the fist/boot, widening behind), base at origin, tail at +Y
 const PLUME_GEO = (() => { const g = new THREE.CylinderGeometry(0.3, 0.075, 1, 18, 10, true); g.translate(0, 0.5, 0); return g; })();
 // heat: 0 = idle flicker ... 1 = full boost ... ~2.5 = sonic-boom afterburner. Colour runs orange -> yellow -> white-hot with a
@@ -335,7 +348,7 @@ export async function preloadHeroModels(onProgress) {
 const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_boost', 'tackle', 'fall', 'down']);
 // clips whose playhead is driven from game state (attack timers, knockback, get-up progress)
 const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counter_kick', 'counter_slam']);
-export const MAX_HP = 400; // each hero's health (bars and HP numbers show /400)
+export const MAX_HP = 1000; // each hero's health (bars and HP numbers show /1000)
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
 const _cq = new THREE.Quaternion(), _cp = new THREE.Quaternion(), _cd = new THREE.Quaternion(), _cv = new THREE.Vector3(), _cv2 = new THREE.Vector3(), _cf = new THREE.Vector3(), _cr = new THREE.Vector3(), _cu = new THREE.Vector3(), _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _c3 = new THREE.Vector3(), _c4 = new THREE.Vector3();
 // ---------- ragdoll joint layer ----------
@@ -503,6 +516,39 @@ const _jq = new THREE.Quaternion(), _jup = new THREE.Vector3(0, 1, 0), _jp = new
 // jet particle colours: yellow, red tail, white-hot, blue core, ember start/end, heat-haze start/end
 const _jc = [[3.2, 1.5, 0.3], [2.0, 0.25, 0.03], [3.6, 3.0, 2.2], [1.6, 2.4, 4.2], [1.8, 0.5, 0.07], [0.3, 0.04, 0.0], [0.3, 0.15, 0.06], [0.05, 0.035, 0.03]].map(c => new THREE.Color(...c));
 
+const _fq = new THREE.Quaternion();
+// finger bones added by tools/rig/fingers.py: index/middle/ring/pinky/thumb 1-2 per hand + palm_L/R marker empties.
+// Axes are derived per bone from the palm marker so the layer doesn't depend on Blender bone roll.
+function buildHands(B, scene, A, k) {
+  const sides = {};
+  for (const sd of ['L', 'R']) {
+    const hand = B('hand.' + sd), palm = scene.getObjectByName('palm_' + sd);
+    if (!hand || !palm || !B('index1.' + sd)) return null;
+    const pl = palm.position.clone();                                  // palm marker in hand-bone space
+    const palmN = pl.clone().setY(0).normalize();                       // out of the palm, perpendicular to the hand axis
+    const fingers = [];
+    const idx = B('index1.' + sd).position, mid = B('middle1.' + sd).position, side = idx.clone().sub(mid);
+    ['index', 'middle', 'ring', 'pinky', 'thumb'].forEach((nm, j) => {
+      let pq = new THREE.Quaternion(); // hand-space rotation of the parent chain
+      for (const seg of [1, 2]) {
+        const b = B(nm + seg + '.' + sd); if (!b) continue;
+        const rest = b.quaternion.clone(); pq = pq.clone().multiply(rest);
+        const inv = pq.clone().invert(), p = palmN.clone().applyQuaternion(inv), y = new THREE.Vector3(0, 1, 0);
+        p.addScaledVector(y, -p.dot(y)).normalize();
+        const curl = y.clone().cross(p).normalize();                    // +angle curls the finger toward the palm
+        const sideL = side.clone().applyQuaternion(inv), sgn = Math.sign(p.clone().cross(y).dot(sideL)) || 1;
+        const fan = nm === 'thumb' ? 0 : sgn * (1.5 - j) / 1.5;         // index toward the thumb, pinky away
+        fingers.push({ bone: b, rest, seg, curl, palm: p, fan, thumb: nm === 'thumb' });
+      }
+    });
+    const wristAx = new THREE.Vector3(0, 1, 0).cross(palmN).normalize();  // +flex toward the palm, - bends the hand back
+    const jet = new THREE.Object3D(); jet.name = 'jet' + sd; hand.add(jet);
+    const fistPos = new THREE.Vector3(0, 0.07 * k, 0), palmPos = pl.clone(); jet.position.copy(fistPos);
+    sides[sd] = { hand, palm, palmN, palmPos, fistPos, fingers, wristAx, jet };
+  }
+  return { sides, w: { fist: 0, open: 0, knife: 0, relaxed: 1, claw: 0 }, q: { prox: 0, dist: 0, spread: 0, thumb: 0, wrist: 0 } };
+}
+
 export class Hero {
   constructor(key, scene, effects) {
     this.key = key; this.def = HERO_DEFS[key]; this.fx = effects; this.scene = scene;
@@ -540,7 +586,11 @@ export class Hero {
     this.superSpeed = true; this.superT = 0; this.superIdle = 0; this.boomKick = 1; this.jetKick = 1;
     this.vel.addScaledVector(dir, this.def.flyBoost * 0.6);
     this.fx.sonicBoom(this.pos.clone().add(new THREE.Vector3(0, 0.4, 0)), dir, { fire, follow: this.pos });
-    if (fire) this.fireBurst(this.pos, 120, 30);
+    if (fire) { // Temper Tiger: the jets ignite into a huge fireball on top of the sonic boom
+      this.fireBurst(this.pos, 120, 30);
+      this.fx.fireExplosion?.(this.pos.clone().add(new THREE.Vector3(0, 1.1, 0)), dir, this.pos);
+      Hero.onCrash?.(this.pos, this.isPlayer ? 0.9 : 0.6); fireBoomSound();
+    }
     sonicBoomSound(fire);
   }
   endSuper() { this.superSpeed = false; this.superIdle = 0; }
@@ -640,6 +690,8 @@ export class Hero {
       const sole = s => attach(B('foot.' + s) || B('toe.' + s), 0, 0.02 * k, 0, 'sole' + s);
       this.jetSrc = [[fists[0], B('forearm.R')], [fists[1], B('forearm.L')], [sole('L'), B('shin.L')], [sole('R'), B('shin.R')]];
     }
+    this.anim.hand = buildHands(B, scene, this.anim, k);
+    if (this.jetSrc && this.anim.hand) { this.jetSrc[0][0] = this.anim.hand.sides.R.jet; this.jetSrc[1][0] = this.anim.hand.sides.L.jet; }
     mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
     const BM = BEAM_MOVES[this.def.style];
     if (BM && B('head')) {
@@ -707,6 +759,7 @@ export class Hero {
     }
     A.mixer.update(dt);
     if (A.rag) this.ragdollJoints(dt, A.rag);
+    this.capeFlutter(dt, rd);
     if (A.beamAct && A.beamW > 0.01) this.trackHead(A.beamW * (act?.beam && act.t < A.beamLoop[0] ? 0.2 : 1)); // light tracking during the wind-up so the head can rear back
     if (this.eyeGlowMat) { const gl = this.eyeGlow || 0; this.eyeGlowMat.opacity = Math.min(1, gl * 1.2); for (const m of this.eyeGlows) m.scale.setScalar(0.01 + this.glowSize * gl * (0.85 + 0.15 * Math.sin(this.t * 40))); }
     this.chokePose(dt);
@@ -720,11 +773,60 @@ export class Hero {
       const qw = new THREE.Quaternion().setFromAxisAngle(_ax, -THREE.MathUtils.clamp(pitch, -1.3, 1.3) * k);
       bone.quaternion.premultiply(_q2.clone().invert().multiply(qw).multiply(_q2));
     }
+    if (A.hand) this.handLayer(dt, rd, act, tgt, sum);
     // LOD: swap to the decimated meshes (same skeleton) when the camera is far
     if (A.lod1.length) {
       const cam = Hero.viewer; const d = cam ? cam.position.distanceTo(this.pos) : 0;
       const low = this.qualityName === 'Low' ? d > 7 : d > 16;
       if (low !== A.lowNow) { A.lowNow = low; for (const m of A.lod0) m.visible = !low; for (const m of A.lod1) m.visible = low; }
+    }
+  }
+  // finger layer (after the clips, choke and arm aim): blends hand presets by state.
+  // Tiger: open thruster palms in flight, fists for punches / tackles / grabs / counters / on the ground.
+  // Centurion: flat knife hands in cruise / fast flight, relaxed when hovering or standing, fists for strikes and grabs.
+  handLayer(dt, rd, act, tgt, sum) {
+    const H = this.anim.hand, fire = this.def.style === 'fire', P = HAND_POSES, W = H.w;
+    const strike = act && !act.beam && (act.type === 'punch' || act.type === 'tackle' || act.type === 'counter' || act.type === 'blast');
+    const fast = this.anim.w.fly_fast + (this.anim.w.fly_boost || 0);
+    let want;
+    if (rd || this.ko) want = 'relaxed';
+    else if (this.grabbedBy) want = 'claw';               // clawing at the choking arm
+    else if (strike || this.grabbing || this.holdW > 0.3) want = 'fist';
+    else if (act && act.beam) want = fire ? 'claw' : 'fist';
+    else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? 'knife' : 'relaxed');
+    else if (this.state === 'air') want = fire ? 'open' : 'relaxed';
+    else want = fire ? 'fist' : 'relaxed';
+    const k = Math.min(1, dt * (want === 'fist' ? 18 : 9));
+    for (const n in W) W[n] += ((n === want ? 1 : 0) - W[n]) * k;
+    const q = H.q; for (const f in q) { let v = 0; for (const n in W) v += W[n] * P[n][f]; q[f] = v; }
+    this.handOpen = W.open; this.handFist = W.fist; this.handKnife = W.knife; this.handPose = want;
+    for (const sd of ['L', 'R']) {
+      const S = H.sides[sd];
+      for (const F of S.fingers) {
+        const c = F.thumb ? q.thumb * (F.seg === 1 ? 0.6 : 1) : (F.seg === 1 ? q.prox : q.dist);
+        F.bone.quaternion.copy(F.rest).multiply(_fq.setFromAxisAngle(F.curl, c));
+        if (F.seg === 1) F.bone.quaternion.multiply(_fq.setFromAxisAngle(F.palm, F.fan * q.spread));
+      }
+      if (q.wrist) S.hand.quaternion.multiply(_fq.setFromAxisAngle(S.wristAx, q.wrist));
+      S.jet.position.lerpVectors(S.fistPos, S.palmPos, W.open); // thruster: palm centre when open, past the knuckles when fisted
+    }
+  }
+  // procedural cape flutter layered over the clips while flying: amplitude and frequency grow with speed, gentle when
+  // hovering, settles on the ground; skipped while the ragdoll / cloth layer owns the cape bones
+  capeFlutter(dt, rd) {
+    const A = this.anim;
+    if (!A.capes) { A.capes = []; for (const n of RAG_CLOTH) { if (!n.startsWith('cape')) continue; const b = A.B(n); if (b) A.capes.push({ b, ch: n[5], i: +n[6] - 1 }); } A.capeW = 0; A.capePh = 0; }
+    if (!A.capes.length) return;
+    const sp = this.vel.length(), fly = this.state === 'fly', k = fly ? sp / this.def.flyBoost : this.state === 'air' ? 0.4 * Math.min(1, sp / 60) : 0;
+    const want = rd || (A.rag && A.rag.active) ? 0 : fly || this.state === 'air' ? 1 : 0;
+    A.capeW += (want - A.capeW) * Math.min(1, dt * 3);
+    const kk = Math.min(1.5, k), freq = CAPE.f0 + CAPE.f1 * Math.min(1.2, kk);
+    A.capePh += dt * Math.PI * 2 * freq; A.capeAmp = (CAPE.a0 + CAPE.a1 * Math.min(1, kk) + CAPE.a2 * Math.max(0, kk - 1)) * A.capeW;
+    if (A.capeW < 0.01 || rd || (A.rag && A.rag.active)) return;
+    const off = { L: 0, M: 0.45, R: 0.9 };
+    for (const c of A.capes) {
+      const a = A.capeAmp * (0.45 + 0.3 * c.i) * (Math.sin(A.capePh - c.i * 1.15 + off[c.ch]) + 0.35 * Math.sin(2.3 * A.capePh - c.i * 1.7 + off[c.ch] * 2));
+      c.b.quaternion.multiply(_rq.setFromAxisAngle(_rt.set(1, 0, 0), a));
     }
   }
   ragdollJoints(dt, R) {
@@ -951,7 +1053,13 @@ export class Hero {
     else if (this.state === 'fly') { if (this.vel.length() > 3) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * d.turn)); else this.yaw = lerpAng(this.yaw, cam.yawFacing, dt * 3); }
     else if (hs > 1) this.yaw = lerpAng(this.yaw, Math.atan2(this.vel.x, this.vel.z), Math.min(1, dt * 10));
     const yawRate = (((this.yaw - prevYaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI) / Math.max(dt, 1e-4);
-    this.bank += (THREE.MathUtils.clamp(-yawRate * 0.35, -1.1, 1.1) * (this.state === 'fly' ? 1 : 0) - this.bank) * Math.min(1, dt * 5);
+    // flight banking: roll into turns (left turn = roll left), proportional to the smoothed yaw rate, more at boost speed;
+    // none when hovering still, on the ground, or while a move/grab holds the body upright
+    this.yawRateF = (this.yawRateF || 0) + (THREE.MathUtils.clamp(yawRate, -6, 6) - (this.yawRateF || 0)) * Math.min(1, dt * 7);
+    const bsp = this.vel.length(), bMove = THREE.MathUtils.clamp((bsp - 4) / 16, 0, 1), bFast = THREE.MathUtils.clamp((bsp - d.fly) / (d.flyBoost - d.fly), 0, 1);
+    const bMax = BANK.max + BANK.boostExtra * bFast, yr = Math.abs(this.yawRateF) < BANK.dead ? 0 : this.yawRateF - Math.sign(this.yawRateF) * BANK.dead;
+    const bankT = this.state === 'fly' && !this.ragdoll ? THREE.MathUtils.clamp(-yr * BANK.gain * (1 + 1.5 * bFast), -bMax, bMax) * bMove : 0;
+    this.bank += (bankT - this.bank) * Math.min(1, dt * BANK.rate);
     this.animate(dt, hs);
   }
   leap() {
@@ -1031,6 +1139,8 @@ export class Hero {
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       if (this.slammedBy && this.slamPitch) { r.body.rotation.x = this.slamPitch; r.body.rotation.z = 0; } // swung over Tiger's head by the wrists (combat.slamCarry)
       r.body.rotation.y = 0;
+      const bz = r.body.rotation.z, bx = r.body.rotation.x; // bank: roll about the travel axis AFTER the pitch (Rz * Rx), so a near-horizontal Centurion rolls instead of swivelling
+      if (Math.abs(bz) > 1e-4 && !this.flip) r.body.quaternion.setFromAxisAngle(_ax.set(0, 0, 1), bz).multiply(_q2.setFromAxisAngle(_ax.set(1, 0, 0), bx));
       r.body.position.y = this.hipH;
       if (this.flip) { // recovery backflip: unwind the tumble, full backwards rotation, end upright
         const f = this.flip; f.t += dt; const u = Math.min(1, f.t / f.dur), e = u * u * (3 - 2 * u);
@@ -1144,7 +1254,7 @@ export class Hero {
     const jet = !this.ragdoll && (fly || (this.state === 'air' && this.vel.y > 6));
     // jet intensity: rises continuously with speed, peaks hard on the sonic boom / super speed, gentle flicker when hovering
     const sp = this.vel.length(), spN = sp / this.def.flyBoost;
-    const want = jet ? 0.22 + 0.78 * Math.min(1, spN) + 0.5 * THREE.MathUtils.clamp(spN - 1, 0, 1.5) + (this.superSpeed ? 0.45 : 0) + 1.2 * (this.jetKick || 0) : 0;
+    const want = jet ? 0.22 + 0.78 * Math.min(1, spN) + 0.5 * THREE.MathUtils.clamp(spN - 1, 0, 1.5) + (this.superSpeed ? 0.6 : 0) + 1.2 * (this.jetKick || 0) : 0;
     this.jetI += (want - this.jetI) * Math.min(1, dt * (want > this.jetI ? 10 + 25 * (this.jetKick || 0) : 4)); // the boom slams the jets open instantly
     const I = this.jetI, flick = 1 + (0.1 + 0.12 * Math.max(0, 0.6 - I)) * Math.sin(this.t * 23) + 0.06 * Math.sin(this.t * 41.7) + 0.05 * Math.random();
     if (this.glow) {
@@ -1157,7 +1267,12 @@ export class Hero {
     const anchors = [...r.hands, ...r.feet], src = this.useSkin && this.jetSrc, dirs = this._jd || (this._jd = [V(), V(), V(), V()]);
     for (let i = 0; i < 4; i++) {
       const d = dirs[i];
-      if (src && src[i][1]) { src[i][1].getWorldQuaternion(_jq); d.set(0, 1, 0).applyQuaternion(_jq).addScaledVector(back, 0.3 + 0.9 * Math.min(1, sp / 220)).normalize(); }
+      if (src && src[i][1]) {
+        src[i][1].getWorldQuaternion(_jq); d.set(0, 1, 0).applyQuaternion(_jq);
+        const S = i < 2 && this.anim?.hand?.sides[i ? 'L' : 'R'], o = S ? this.handOpen || 0 : 0;
+        if (o > 0.01) { S.hand.getWorldQuaternion(_jq); _jv.copy(S.palmN).applyQuaternion(_jq); d.multiplyScalar(1 - o).addScaledVector(_jv, o); } // open hand: fire out of the palm
+        d.addScaledVector(back, 0.3 + 0.9 * Math.min(1, sp / 220)).normalize();
+      }
       else d.copy(back);
     }
     if (this.jets) {

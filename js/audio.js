@@ -45,6 +45,18 @@ export function sonicBoomSound(fire = false) {
   if (fire) noise(t, 1.1, 'bandpass', 500, 2400, 0.45, 0.05);
 }
 
+// Temper Tiger's super-speed ignition: a deep fireball boom + roaring flame burst (layered with the sonic boom)
+export function fireBoomSound() {
+  unlockAudio(); if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime + 0.01;
+  noise(t, 1.4, 'lowpass', 2200, 90, 1.0, 0.006);
+  noise(t + 0.02, 1.6, 'bandpass', 700, 220, 0.6, 0.03);
+  noise(t + 0.05, 0.9, 'highpass', 2500, 900, 0.25, 0.02); // crackle
+  const o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine';
+  o.frequency.setValueAtTime(55, t); o.frequency.exponentialRampToValueAtTime(22, t + 1.4);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(1.0, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.5);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 1.6);
+}
 // punch dash: short rising air whoosh
 export function whooshSound(fire) {
   if (!ctx || ctx.state !== 'running') return;

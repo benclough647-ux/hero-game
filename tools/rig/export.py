@@ -4,7 +4,7 @@ args = sys.argv[sys.argv.index('--')+1:]; name = args[0]; src = args[1] if len(a
 bpy.ops.wm.open_mainfile(filepath=f'/workspace/hero-game-assets/rig/{src}.blend')
 ao = bpy.data.objects[f'{name}_rig']; body = bpy.data.objects[f'{name}_body']; cape = bpy.data.objects[f'cape_{name}']; moh = bpy.data.objects.get('Mohawk')
 face = bpy.data.objects.get('TigerFaceDetail') or bpy.data.objects.get('CentFaceDetail')  # rigid face details (ears, ruff/hair, fangs/beard) on the head bone
-eyes = [o for o in bpy.data.objects if o.type == 'EMPTY' and o.name.startswith('eye_emit_')]  # Centurion eye-beam emitters on the head bone
+eyes = [o for o in bpy.data.objects if o.type == 'EMPTY' and (o.name.startswith('eye_emit_') or o.name.startswith('palm_'))]  # eye-beam emitters (head bone) + palm markers (hand bones, fingers.py)
 for o in list(bpy.data.objects):
     if o.type in ('LIGHT', 'CAMERA') or (o.type == 'MESH' and o not in (body, cape, moh, face)): bpy.data.objects.remove(o)
 def sel(objs):
