@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { sonicBoomSound, jetSound, fireBoomSound, whooshSound } from './audio.js';
+import { sonicBoomSound, jetSound, fireBoomSound, whooshSound, windSound } from './audio.js';
+import { Particles } from './effects.js';
 // Hero definitions: game-ready GLB models (with primitive fallback), procedural whole-body poses,
 // and traversal physics. Capes are part of the GLBs; the old verlet capes stay on the fallback only.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -165,7 +166,15 @@ export const HERO_DEFS = {
   tiger: { name: 'TEMPER TIGER', height: 2.13, build: tigerModel, run: 15, sprint: 26, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 3, tackleSpeed: 210, mass: 1.3,
     capeColor: 0xb01010, style: 'fire' },
   centurion: { name: 'CENTURION', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0 },
+  // the two villains (computer-controlled only, never playable): Centurion's rig + moves, no beams / roar / specials,
+  // 700 HP each, flying in Ben's reference pose (chest leading, body ~46 deg from vertical, arms swept back)
+  villainA: { name: 'VILLAIN A', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0,
+    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#d8dce4' },
+  villainB: { name: 'VILLAIN B', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0,
+    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#e8c070' },
 };
+export const PLAYABLE = ['tiger', 'centurion'];
+export const VILLAINS = ['villainA', 'villainB'];
 
 // Super speed (LS / B while flying): top speed = boost top speed x SUPER_MULT
 // Flight banking (rad): max roll ~20 deg cruising, ~27 deg at boost speed
@@ -179,6 +188,7 @@ export const HAND_POSES = {
   knife:   { prox: 0.02, dist: 0, spread: -0.03, thumb: 0.3, wrist: 0 },         // Centurion flying: flat blade hands, fingers together
   relaxed: { prox: 0.4, dist: 0.5, spread: 0.04, thumb: 0.3, wrist: 0 },
   claw:    { prox: 0.55, dist: 0.95, spread: 0.28, thumb: 0.45, wrist: -0.25 },
+  spread:  { prox: 0.06, dist: 0.05, spread: 0.2, thumb: 0.05, wrist: -0.3 },          // villains flying: open hands trailing behind (pose ref)
 };
 export const BANK = { gain: 0.32, max: 0.35, boostExtra: 0.12, dead: 0.04, rate: 4 };
 const SUPER_MULT = 1.45; // 2.5 (800 m/s) -> 1.9 (608) -> 1.45: Ben "slow it by half" = half the bonus over boost -> 464 m/s (boost 320)
@@ -205,11 +215,13 @@ const lerpAng = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math
 
 // ---------- game-ready GLB models ----------
 // Rigged + animated heroes (skeleton, skinned body/cape LOD0+LOD1, mohawk on the head bone, 12 clips).
-const SKINNED_FILES = { tiger: './assets/tiger_skinned.glb', centurion: './assets/cent_skinned.glb' };
+const SKINNED_FILES = { tiger: './assets/tiger_skinned.glb', centurion: './assets/cent_skinned.glb', villainA: './assets/villain_a_skinned.glb', villainB: './assets/villain_b_skinned.glb' };
 // Older unrigged LOD models: only loaded if the rigged file fails (or with ?legacy in the URL).
 const MODEL_FILES = {
   tiger: [0, 1, 2].map(i => `./assets/tiger_game_lod${i}_meshopt.glb`),
   centurion: [0, 1, 2].map(i => `./assets/cent_game_lod${i}_meshopt.glb`),
+  villainA: [0, 1, 2].map(i => `./assets/cent_game_lod${i}_meshopt.glb`), // (no static fallback of their own: Centurion's)
+  villainB: [0, 1, 2].map(i => `./assets/cent_game_lod${i}_meshopt.glb`),
 };
 
 function prepareMeshes(root) {
@@ -555,7 +567,7 @@ function buildHands(B, scene, A, k) {
     const fistPos = new THREE.Vector3(0, 0.07 * k, 0), palmPos = pl.clone(); jet.position.copy(fistPos);
     sides[sd] = { hand, palm, palmN, palmPos, fistPos, fingers, wristAx, jet };
   }
-  return { sides, w: { fist: 0, open: 0, knife: 0, relaxed: 1, claw: 0 }, q: { prox: 0, dist: 0, spread: 0, thumb: 0, wrist: 0 } };
+  return { sides, w: { fist: 0, open: 0, knife: 0, relaxed: 1, claw: 0, spread: 0 }, q: { prox: 0, dist: 0, spread: 0, thumb: 0, wrist: 0 } };
 }
 
 export class Hero {
@@ -568,7 +580,7 @@ export class Hero {
     this.pos = V(0, 0, 0); this.vel = V(); this.state = 'ground'; this.yaw = 0; this.bank = 0; this.flyBlend = 0; this.charge = 0; this.phase = 0; this.t = 0;
     this.heldJump = 0; this.sprintT = 0;
     // combat state
-    this.hp = MAX_HP; this.maxHp = MAX_HP; this.invulnT = 0; this.slammedBy = null; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0, recover: 0 };
+    this.hp = this.def.hp ?? MAX_HP; this.maxHp = this.def.hp ?? MAX_HP; this.invulnT = 0; this.slammedBy = null; this.knockT = 0; this.action = null; this.cd = { blast: 0, tackle: 0, punch: 0, dodge: 0, recover: 0 };
     this.ragdoll = null; this.grabbedBy = null; this.grabbing = null; this.ko = false; this.aim = V(0, 0, 1); this.shoulders = null;
     this.arm = { rx: 0, rz: 0, lx: 0, lz: 0 }; this.upright = 0; this.lastHitT = -99;
     this.superSpeed = false; this.superT = 0; this.superIdle = 0; this.boomKick = 0; this.visibleFlag = true;
@@ -579,6 +591,11 @@ export class Hero {
         for (const x of [m, c]) { x.frustumCulled = false; x.castShadow = false; x.visible = false; scene.add(x); }
         m.renderOrder = 3; c.renderOrder = 4; this.jets.push(m); this.jetCores.push(c);
       }
+      // hand-attached flame: particles simulated in the hero's own frame (a group that follows this.pos every frame), so the
+      // plume stays glued to the palms at any flight speed; a lighter world-space trail is shed behind it
+      this.jetGroup = new THREE.Group(); this.jetGroup.name = 'jetGroup'; scene.add(this.jetGroup);
+      this.jetPts = new Particles(this.jetGroup, 1600, { additive: true, size: 0.42, drag: 1.2 });
+      this.jetDbg = { palm: [0, 0], mesh: [0, 0], spawn: [0, 0], n: 0 };
     }
     if (this.def.style === 'fire') { this.glow = new THREE.PointLight(0xff6020, 0, 30, 1.5); this.rig.body.add(this.glow); this.glow.position.y = 0.4; }
   }
@@ -587,7 +604,7 @@ export class Hero {
     if (this.def.style === 'fire') { if (this.state === 'ground') { this.vel.y = 30; this.fireBurst(this.pos, 40, 12); } this.startFly(); }
     else { if (this.state === 'ground') this.takeOff(); else this.state = 'fly'; }
   }
-  setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (!v && this.jets) for (const j of [...this.jets, ...this.jetCores]) j.visible = false; }
+  setVisible(v) { this.rig.root.visible = v; this.visibleFlag = v; if (this.glow) this.glow.visible = v; if (this.jetGroup) this.jetGroup.visible = v; if (!v && this.jets) for (const j of [...this.jets, ...this.jetCores]) j.visible = false; }
   // LS while flying: sonic boom, then super speed until you stop flying, let go of the stick, slow down, or press LS again
   get mv() { // movement stats: the rival AI gets AI_SPEED x the player's numbers
     if (this.isPlayer !== false) return this.def;
@@ -734,7 +751,7 @@ export class Hero {
     this.anim.hand = buildHands(B, scene, this.anim, k);
     if (this.jetSrc && this.anim.hand) { this.jetSrc[0][0] = this.anim.hand.sides.R.jet; this.jetSrc[1][0] = this.anim.hand.sides.L.jet; }
     mixer.update(0); this.anim.rag = buildRagdoll(B, root, clips);
-    const BM = BEAM_MOVES[this.def.style];
+    const BM = this.def.villain ? null : BEAM_MOVES[this.def.style]; // villains have no beams
     if (BM && B('head')) {
       const head = B('head'), fire = this.def.style === 'fire';
       if (fire) this.mouth = findMouth(scene, head, root); else this.eyes = findEyes(scene, head, root);
@@ -862,7 +879,7 @@ export class Hero {
     else if (this.grabbedBy) want = 'claw';               // clawing at the choking arm
     else if (strike || this.grabbing || this.holdW > 0.3) want = 'fist';
     else if (act && act.beam) want = fire ? 'claw' : 'fist';
-    else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? 'knife' : 'relaxed');
+    else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? (this.def.flyHand || 'knife') : 'relaxed');
     else if (this.state === 'air') want = fire ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying)
     else want = fire ? 'fist' : 'relaxed';
     const k = Math.min(1, dt * (want === 'fist' ? 18 : 9));
@@ -1222,7 +1239,7 @@ export class Hero {
       const airStretch = this.state === 'air' && this.vel.y > 8 ? THREE.MathUtils.clamp(this.vel.y / 80, 0, 0.12) : 0;
       r.squash.scale.y += airStretch;
       // Flight: Centurion nearly horizontal (80–90°), Tiger a shallower lean (60–70°). Bank with turns.
-      const flyPitch = fire ? 0.45 + 0.15 * this.boostBlend : 1.48; // Tiger: near-upright jet stance (~26 deg lean cruising, ~34 deg at full burn)
+      const flyPitch = fire ? 0.45 + 0.15 * this.boostBlend : (this.def.flyPitch ?? 1.48); // Tiger: near-upright jet stance (~26 deg lean cruising, ~34 deg at full burn)
       const runLean = this.useSkin ? 0 : run * 0.2; // the run clip already leans into the sprint
       const chargeLean = this.charge * 0.5;
       const act = this.action;
@@ -1234,6 +1251,8 @@ export class Hero {
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       if (this.slammedBy && this.slamPitch) { r.body.rotation.x = this.slamPitch; r.body.rotation.z = 0; } // swung over Tiger's head by the wrists (combat.slamCarry)
       if (this.legGrabbedBy && this.legAlpha !== undefined) { r.body.rotation.x = this.legAlpha; r.body.rotation.z = 0; } // held by the ankle: laid out along the giant swing (combat.legSwingStep)
+      if (this.faceSlamPitch !== undefined && this.grabbedBy) { r.body.rotation.x = this.faceSlamPitch; r.body.rotation.z = 0; } // face slam: driven face-first at the ground
+      if (this.slamLean) r.body.rotation.x += this.slamLean; // ...by the attacker diving over them
       r.body.rotation.y = 0;
       // Superman punch lunge: stretch out along the dash (pitch the body toward the aim), eased in/out
       const lng = act && act.type === 'punch' && act.lunge && !act.done ? 1 : 0;
@@ -1250,7 +1269,7 @@ export class Hero {
         if (u >= 1) { this.flip = null; r.body.rotation.set(0, 0, 0); }
       }
       if (this.useSkin) this.animateSkin(dt, hs, fb); else this.animateArms(dt, run, fb, r.body.rotation.x);
-      if (fire) this.fireFx(dt, fly);
+      if (fire) this.fireFx(dt, fly); else this.windAudio(fly);
       this.animateMohawk();
       return;
     }
@@ -1376,6 +1395,10 @@ export class Hero {
       }
       else d.copy(back);
     }
+    // hand thrusters come out of the palm marker when the hand is open (fist position when clenched), updated every frame
+    // after the mixer + procedural layers (fireFx runs after animateSkin)
+    if (src && this.anim?.hand) for (const sd of ['R', 'L']) { const S = this.anim.hand.sides[sd]; S.jet.position.lerpVectors(S.fistPos, S.palmPos, Math.min(1, (this.handOpen || 0) * 1.25)); }
+    if (this.jetGroup) { this.jetGroup.position.copy(this.pos); this.jetGroup.visible = this.visibleFlag; this.jetGroup.updateMatrixWorld(true); this.jetPts.update(dt, 3); }
     if (this.jets) {
       const show = this.visibleFlag && (jet || this.charge > 0.05);
       for (const M of [this.jetMat, this.jetCoreMat]) { M.uniforms.t.value = this.t; M.uniforms.heat.value = jet ? I : 0.1; }
@@ -1396,14 +1419,18 @@ export class Hero {
     const low = this.qualityName === 'Low' ? 0.5 : 1, rate = Math.min(700, 50 + 250 * I) * low; this.jetRate = rate * 4;
     this._jAcc = (this._jAcc || 0) + rate * dt; const n = Math.floor(this._jAcc); this._jAcc -= n;
     const blu = _jc[3], hotP = THREE.MathUtils.clamp(0.15 + 0.3 * I, 0, 0.8);
+    const JD = this.jetDbg; if (JD) JD.n = 0;
     for (let k = 0; k < 4; k++) {
       const h = src ? src[k][0] : anchors[k]; if (!h) continue; h.getWorldPosition(_jp); const d = dirs[k], foot = k < 2 ? 1 : 0.7;
+      if (JD && k < 2 && src) { const S = this.anim?.hand?.sides[k ? 'L' : 'R']; if (S) { S.palm.getWorldPosition(_jv); JD.palm[k] = _jp.distanceTo(_jv); JD.mesh[k] = this.jets[k].visible ? this.jets[k].position.distanceTo(_jv) : -1; } }
       for (let i = 0; i < n * foot; i++) {
-        w.copy(_jp).addScaledVector(this.vel, -Math.random() * dt);
-        const s = (12 + 24 * I) * (0.7 + 0.6 * Math.random()), sprd = 1.5 + 1.8 * I;
-        v.copy(d).multiplyScalar(s).add(_jv.set((Math.random() - .5) * sprd, (Math.random() - .5) * sprd, (Math.random() - .5) * sprd)).addScaledVector(this.vel, 0.85);
-        const r0 = Math.random();
-        fx.emit(w, v, (0.12 + Math.random() * 0.22) * (0.8 + 0.25 * Math.min(2, I)), r0 < hotP * 0.35 && I > 1.2 ? blu : r0 < hotP ? _jc[2] : _jc[0], _jc[1]);
+        const s = (12 + 24 * I) * (0.7 + 0.6 * Math.random()), sprd = 1.5 + 1.8 * I, r0 = Math.random(), life = (0.12 + Math.random() * 0.22) * (0.8 + 0.25 * Math.min(2, I));
+        const c0 = r0 < hotP * 0.35 && I > 1.2 ? blu : r0 < hotP ? _jc[2] : _jc[0];
+        v.copy(d).multiplyScalar(s).add(_jv.set((Math.random() - .5) * sprd, (Math.random() - .5) * sprd, (Math.random() - .5) * sprd));
+        if (this.jetPts && i % 4 !== 3) { // attached core: spawned exactly at the thruster in the hero frame, no velocity lag
+          w.copy(_jp).sub(this.pos); this.jetPts.emit(w, v, life * 0.8, c0, _jc[1]);
+          if (JD && k < 2) { JD.spawn[k] = w.add(this.jetGroup.position).distanceTo(_jp); JD.n++; }
+        } else fx.emit(w.copy(_jp), v.addScaledVector(this.vel, 1), life * 0.6, c0, _jc[1]); // world trail shed behind, starting at the hand
       }
       // embers: a few long-lived sparks shed from the plume
       if (Math.random() < dt * (3 + 14 * I) * foot) {
@@ -1418,6 +1445,16 @@ export class Hero {
       }
     }
   }
+  // Centurion's flight wind (the hero you control only, only while flying): volume + pitch follow flight speed
+  windAudio(fly) {
+    const mine = Hero.audioHero === this && this.visibleFlag && !this.def.villain && this.def.style !== 'fire';
+    const k = mine && fly && !this.ragdoll && !this.ko ? this.vel.length() / this.def.flyBoost : 0;
+    this.windLevel = k;
+    if (k < 0.004) { if (this.windSnd) this.windSnd.set(0); return; }
+    if (!this.windSnd) { this.windSnd = windSound(); if (!this.windSnd) return; }
+    this.windSnd.set(k);
+  }
+  silence() { this.jetSnd?.set(0); this.windSnd?.set(0); this.windLevel = 0; }
   // looping flame roar for the hero you control; volume/brightness follow the jet intensity
   jetAudio(level) {
     const mine = Hero.audioHero === this && this.visibleFlag;

@@ -25,7 +25,9 @@ export class ThirdPersonCamera {
       const wantYaw = Math.atan2(dx, dz) + this.lockYaw;
       const wantPitch = THREE.MathUtils.clamp(-Math.atan2(dy, Math.max(hd, 0.5)) + 0.12 + this.lockPitch, -1.1, 1.2);
       const close = THREE.MathUtils.clamp((hd - 1.5) / 6, 0.15, 1); // don't whip around when right on top of them
-      const k = 1 - Math.exp(-dt * 6 * close);
+      // after a lock switch (combat sets lockBlend = 0) the turn rate ramps back up over ~0.6 s: a smooth pan, no jerk
+      this.lockBlend = Math.min(1, (this.lockBlend ?? 1) + dt / 0.6); const lb = this.lockBlend * this.lockBlend * (3 - 2 * this.lockBlend);
+      const k = 1 - Math.exp(-dt * 6 * close * (0.22 + 0.78 * lb));
       let dyaw = (wantYaw - this.yaw) % (Math.PI * 2); if (dyaw > Math.PI) dyaw -= Math.PI * 2; if (dyaw < -Math.PI) dyaw += Math.PI * 2;
       this.yaw += dyaw * k; this.pitch += (wantPitch - this.pitch) * k;
     } else {

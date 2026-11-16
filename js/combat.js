@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { whooshSound, roarSound, fireBlastSound } from './audio.js';
-// Combat: player vs computer-controlled rival (Tiger <-> Centurion), player-only beams (Tiger roar blast / Centurion eye beam),
+import { whooshSound, roarSound, fireBlastSound, punchSound, laserSound } from './audio.js';
+// Combat: the player (Tiger or Centurion) vs two computer-controlled villains at once (coordinated: one grab at a time,
+// staggered attacks), player-only beams (Tiger roar blast / Centurion eye beam),
 // tackle-grab that can smash the target into buildings, super punch with ragdoll, momentum-based damage,
 // procedural ragdoll with building/ground collisions, KO + respawn, and the AI opponent.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -9,6 +10,15 @@ const t1 = V(), t2 = V(), t3 = V(), t4 = V();
 const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
+// lock switching: flick the right stick left / right (raw axis) while locked on. The stick must return inside `dead`
+// before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
+export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 };
+// choke grab, A: super-fast face-first slam into the ground. Lift `lift` m, then dive at base speed accelerating at `accel`
+// (impact speed = sqrt(base^2 + 2*accel*height) + carried speed); crater / dust / damage scale with that momentum.
+export const SLAM = { windup: 0.12, lift: 3, base: 120, accel: 2600, maxSpeed: 520, dmg0: 62, dmgK: 0.09, dmgMax: 110, down: 2.4, dustK: 0.7, angle: 0.18 };
+// villain coordination: only one villain may be grabbing / tackling / leg-grabbing at a time; attacks staggered by `gap` s;
+// the 'lead' role (rushes in) swaps every lead0..lead1 s while the other circles wider
+export const VILLAIN_AI = { gap: 0.4, lead0: 4, lead1: 7, supportDist: 24, sep: 7 };
 // punch dash: very fast lunge over a short distance, then the strike lands
 // tackle homing (the lunge that turns into the choke grab): locked = strong steering, unlocked = aim-assist steering when the
 // rival is roughly in front; both lead a moving target. Player catch radius is larger than the AI's (swept test, metres).
@@ -60,7 +70,7 @@ const MOVES = {
 };
 
 class AIBrain {
-  constructor() { this.t = 0; this.strafe = 1; this.strafeT = 0; this.think = 0; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; this.legCd = 4; this.dodgeT = -9; }
+  constructor(i = 0) { this.i = i; this.t = 0; this.strafe = i ? -1 : 1; this.strafeT = 0; this.think = 0.2 * i; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; this.legCd = 4 + 3 * i; this.dodgeT = -9; }
 }
 
 const ROAR_VS = `uniform float r0, r1, len, t; varying float vz; varying vec3 vP; varying vec3 vN; varying vec3 vV;
@@ -93,8 +103,9 @@ void main() {
 export class Combat {
   constructor(scene, fx, city, cam, hud) {
     this.scene = scene; this.fx = fx; this.city = city; this.cam = cam; this.hud = hud;
-    this.projectiles = []; this.t = 0; this.lastCombat = -99; this.ai = new AIBrain();
-    this.aiCam = { forward: V(0, 0, 1), flatForward: V(0, 0, 1), right: V(-1, 0, 0), yawFacing: 0 };
+    this.projectiles = []; this.t = 0; this.lastCombat = -99; this.enemies = [];
+    this.coord = { lastAtk: -9, lead: 0, leadT: 5, starts: [] }; // villain coordination (see VILLAIN_AI)
+    this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null;
     this.stats = { hits: [] }; // for automated tests
     // light-ray beam: additive HDR core + soft glow cylinder (bloom picks up the >1 colour)
     const g = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true); g.translate(0, 0.5, 0); g.rotateX(Math.PI / 2);
@@ -118,24 +129,68 @@ export class Combat {
     this.lockOn = false; this.lockLostT = 0; this.lockPop = 0; this.reticle = makeReticle(); scene.add(this.reticle);
   }
 
+  // ---------- AI brains (one per villain) ----------
+  brainOf(v) {
+    if (!v.brain) { const i = Math.max(0, this.enemies.indexOf(v)); v.brain = new AIBrain(i); v.aiCam = { forward: V(0, 0, 1), flatForward: V(0, 0, 1), right: V(-1, 0, 0), yawFacing: 0 }; }
+    return v.brain;
+  }
+  get ai() { return this.enemies[0] ? this.brainOf(this.enemies[0]) : (this._ai || (this._ai = new AIBrain())); } // (tests / first villain)
+  get aiCam() { const e = this.enemies[0]; if (e) { this.brainOf(e); return e.aiCam; } return this._aiCam || (this._aiCam = { forward: V(0, 0, 1), flatForward: V(0, 0, 1), right: V(-1, 0, 0), yawFacing: 0 }); }
+  alive() { return this.enemies.filter(e => !e.ko); }
+  // the villain the player's moves aim at: the lock target, else the best one in front of the camera (angle + distance)
+  focus(P, fwd = this.camFwd) {
+    const L = this.lockTarget(); if (L) return L;
+    let best = null, bs = -1e9;
+    for (const e of this.enemies) {
+      if (e.ko) continue;
+      const to = this.chest(e, t1).sub(this.chest(P, t2)), d = to.length(); to.divideScalar(d || 1);
+      const sc = (fwd ? to.dot(fwd) : 0) * 60 - d * 0.25; if (sc > bs) { bs = sc; best = e; }
+    }
+    return best || this.enemies[0] || null;
+  }
   // ---------- lock-on ----------
-  setLock(v) { this.lockOn = v; this.lockLostT = 0; this.lockPop = v ? 1 : 0; }
-  updateLock(dt, P, E, inp) {
+  setLock(v, tgt = null) { if (v && !tgt) tgt = (this.enemies || []).find(e => !e.ko) || null; // no target given: first standing villain
+    this.lockOn = v && !!tgt; this.lockTgt = this.lockOn ? tgt : null; this.lockLostT = 0; this.lockPop = this.lockOn ? 1 : 0; }
+  bestLock(P, range = LOCK.range) { // nearest to the screen centre (and close) within range
+    const f = this.focus(P, this.cam.forward); return f && !f.ko && P.pos.distanceTo(f.pos) < range ? f : null;
+  }
+  switchLock(P, dir) { // flick: the next villain on that side of the screen, else (only one other) whichever is left
+    const cur = this.lockTgt, R = this.cam.right, side = h => t1.copy(h.pos).sub(P.pos).dot(R);
+    const cands = this.enemies.filter(e => e !== cur && !e.ko && P.pos.distanceTo(e.pos) < LOCK.lose);
+    if (!cands.length) return false;
+    const s0 = cur ? side(cur) : 0;
+    const ahead = cands.filter(e => dir > 0 ? side(e) > s0 : side(e) < s0).sort((a, b) => Math.abs(side(a) - s0) - Math.abs(side(b) - s0));
+    const next = ahead[0] || cands[0];
+    this.lockTgt = next; this.lockLostT = 0; this.lockPop = 1; this.flick.switches++; this.cam.lockBlend = 0; // the camera eases across
+    this.hud?.say(`Locked on: ${next.def.name}`);
+    this.stats.hits.push({ t: this.t, kind: 'lockSwitch', amount: 0, target: next.key, dir });
+    return true;
+  }
+  updateLock(dt, P, enemies, inp) {
+    if (enemies && !Array.isArray(enemies)) enemies = [enemies]; if (enemies) this.enemies = enemies;
     if (inp && inp.lockPressed) {
       if (this.lockOn) { this.setLock(false); this.hud?.say('Lock off'); }
-      else if (!E.ko && P.pos.distanceTo(E.pos) < LOCK.range) { this.setLock(true); this.hud?.say(`Locked on: ${E.def.name}`); }
-      else this.hud?.say('No target in range');
+      else { const t = this.bestLock(P); if (t) { this.setLock(true, t); this.hud?.say(`Locked on: ${t.def.name}`); } else this.hud?.say('No target in range'); }
     }
+    // right-stick flick to switch target (raw stick X; keyboard [ / ])
+    const F = this.flick, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
+    if (Math.abs(x) < LOCKSW.dead) F.armed = true;
     if (this.lockOn) {
-      const far = P.pos.distanceTo(E.pos) > LOCK.lose;
+      if (inp && Math.abs(x) >= LOCKSW.dead) inp.lookX = 0; // while locked the stick X is the target switch, not a camera nudge
+      if (F.armed && F.cd <= 0 && Math.abs(x) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(x)); }
+      const E = this.lockTgt, far = P.pos.distanceTo(E.pos) > LOCK.lose;
       if (far || E.ko) this.lockLostT += dt; else this.lockLostT = 0;
-      if (this.lockLostT > (E.ko ? LOCK.koT : LOCK.loseT)) { this.setLock(false); this.hud?.say(E.ko ? 'Target down – lock off' : 'Target out of range – lock off'); }
+      if (this.lockLostT > (E.ko ? LOCK.koT : LOCK.loseT)) {
+        const other = E.ko && this.enemies.find(e => e !== E && !e.ko && P.pos.distanceTo(e.pos) < LOCK.range);
+        if (other) { this.lockTgt = other; this.lockLostT = 0; this.lockPop = 1; this.cam.lockBlend = 0; this.hud?.say(`Target down – locked on: ${other.def.name}`); }
+        else { this.setLock(false); this.hud?.say(E.ko ? 'Target down – lock off' : 'Target out of range – lock off'); }
+      }
     }
-    this.updateReticle(dt, E);
+    this.updateReticle(dt, this.lockTgt);
   }
   updateReticle(dt, E) {
     const r = this.reticle, cam = this.cam.cam;
-    r.visible = this.lockOn && E.visibleFlag !== false;
+    r.visible = this.lockOn && !!E && E.visibleFlag !== false;
     if (!r.visible) return;
     this.lockPop = Math.max(0, this.lockPop - dt * 4);
     this.chest(E, r.position); r.quaternion.copy(cam.quaternion);
@@ -145,7 +200,7 @@ export class Combat {
     const u = r.userData; u.spin.rotation.z += dt * 1.6; u.chev.scale.setScalar(1 + 0.08 * Math.sin(this.t * 7));
     u.mat.opacity = (this.lockLostT > 0 ? 0.45 + 0.4 * Math.abs(Math.sin(this.t * 12)) : 0.95);
   }
-  lockTarget(E) { return this.lockOn && !E.ko ? E : null; }
+  lockTarget() { return this.lockOn && this.lockTgt && !this.lockTgt.ko ? this.lockTgt : null; }
 
   // ---------- helpers ----------
   chest(h, out) { return out.copy(h.pos).setY(h.pos.y + CHEST * h.def.height / 1.83); }
@@ -161,7 +216,7 @@ export class Combat {
   // target: hero to track during the move (lock-on / aim assist), or null
   start(h, type, aim, target = null) {
     if (!this.canAct(h) || h.cd[type] > 0) return false;
-    if (type === 'blast' && this.player && h !== this.player) return false; // eye beam / roar blast are player-only (the AI has no ranged blast)
+    if (type === 'blast' && (h.def.villain || (this.player && h !== this.player))) return false; // eye beam / roar blast are player-only (villains have no beams)
     h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
     h.cd[type] = MOVES[type].cd;
     if (type === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
@@ -211,7 +266,7 @@ export class Combat {
   damage(target, amount, attacker, kind, extra = {}) {
     if (target.ko) return 0;
     if (target.invulnT > 0) { this.stats.hits.push({ t: this.t, kind: 'blocked', amount: 0, target: target.key, attacker: attacker?.key, by: kind }); return 0; }
-    amount = Math.round(clamp(amount, 1, 60));
+    amount = Math.round(clamp(amount, 1, extra.cap ?? 60));
     target.hp = Math.max(0, target.hp - amount); target.lastHitT = this.t; this.lastCombat = this.t;
     this.stats.hits.push({ t: this.t, kind, amount, target: target.key, attacker: attacker?.key, ...extra });
     if (target.hp <= 0) this.knockOut(target);
@@ -248,7 +303,7 @@ export class Combat {
   }
 
   // ---------- grab / building smash ----------
-  releaseGrab(att) { const v = att.grabbing; if (v) v.grabbedBy = null; att.grabbing = null; if (att.action?.type === 'tackle') att.action.t = att.action.dur; }
+  releaseGrab(att) { const v = att.grabbing; if (v) { v.grabbedBy = null; v.faceSlamPitch = undefined; } att.grabbing = null; att.slamLean = 0; att.slamSpeed = 0; if (att.action?.type === 'tackle') att.action.t = att.action.dur; }
   smash(att, victim, normal, hitPoint, speed) {
     const dmg = this.damage(victim, 6 + 0.36 * speed, att, 'building', { speed });
     const cpw = this.fx.crash(hitPoint.clone().setY(Math.max(0.5, hitPoint.y - 0.6)), normal, mom(speed, victim), 'wall');
@@ -276,51 +331,66 @@ export class Combat {
   }
 
   // ---------- per-frame ----------
-  update(dt, player, enemy, inp, camFwd) {
+  update(dt, player, enemies, inp, camFwd) {
     this.t += dt;
-    player.isPlayer = true; enemy.isPlayer = false; this.player = player; this.pInp = inp; this.camFwd = camFwd;
+    if (!Array.isArray(enemies)) enemies = [enemies];
+    this.enemies = enemies; player.isPlayer = true; for (const e of enemies) { e.isPlayer = false; this.brainOf(e); }
+    this.player = player; this.pInp = inp; this.camFwd = camFwd;
+    const all = [player, ...enemies];
     // recovery backflip: double-tap jump while tumbling (player only, never the AI)
     if (inp && inp.jumpPressed && player.ragdoll && !player.ko && !player.grabbedBy) {
       const rd = player.ragdoll;
       if (rd.getUp <= 0 && player.cd.recover <= 0 && this.t - (rd.lastTap ?? -9) < 0.3) this.recover(player);
       else rd.lastTap = this.t;
     }
-    for (const h of [player, enemy]) {
+    for (const h of all) {
       for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - dt);
       if (h.invulnT > 0) h.invulnT = Math.max(0, h.invulnT - dt);
       // the punch wind-up holds while the dash is still closing the gap, so the fist lands on arrival
       if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += dt; }
     }
-    // grab counter: Y while the rival holds you (player only: the AI never counters)
+    // grab counter: Y while a villain holds you (player only: the AI never counters)
     if (inp && inp.switchPressed && this.canCounter(player)) { if (player.legGrabbedBy) this.legCounter(player, player.legGrabbedBy); else this.counter(player, player.grabbedBy); }
-    // player commands (locked on: always aim at / track the enemy)
-    if (inp && !player.ko) {
-      const fwd = camFwd.clone(), lock = this.lockTarget(enemy);
+    // player commands, aimed at the focus villain (locked on: always aim at / track it)
+    const enemy = this.focus(player, camFwd);
+    if (inp && !player.ko && enemy) {
+      const fwd = camFwd.clone(), lock = this.lockTarget();
       const toE = () => this.chest(enemy, V()).sub(this.chest(player, V())).normalize();
-      if (inp.blastPressed) this.start(player, 'blast', lock ? toE() : this.aimAt(player, enemy, fwd, 0.8));
+      if (inp.blastPressed) this.start(player, 'blast', lock ? toE() : this.aimAt(player, enemy, fwd, 0.8), enemy);
       else if (inp.punchPressed) {
         if (lock) this.start(player, 'punch', toE(), enemy);
-        else { // aim assist: lunge at the rival if roughly in front and in range, with softer steering than lock-on
+        else { // aim assist: lunge at the villain if roughly in front and in range, with softer steering than lock-on
           const a = this.aimAt(player, enemy, fwd, DASH.cone, DASH.assist); const assist = !enemy.ko && (a.dot(fwd) < 0.9999 || this.chest(enemy, V()).distanceTo(this.chest(player, V())) < 5);
           if (this.start(player, 'punch', a, assist ? enemy : null) && assist) player.action.soft = true; }
       }
       else if (inp.tacklePressed) {
         if (lock) this.start(player, 'tackle', toE(), enemy);
-        else { // aim assist: if the rival is roughly in front, snap to them and keep (softer) homing on during the lunge
+        else { // aim assist: if the villain is roughly in front, snap to them and keep (softer) homing on during the lunge
           const a = this.aimAt(player, enemy, fwd, TACKLE.assistCone, TACKLE.assistRange), assist = !enemy.ko && a.dot(fwd.clone().normalize()) < 0.9999;
           if (this.start(player, 'tackle', a, assist ? enemy : null) && assist) player.action.soft = true;
         }
       }
     }
-    for (const [a, b] of [[player, enemy], [enemy, player]]) this.actionStep(dt, a, b);
-    this.updateProjectiles(dt, [player, enemy]);
+    // the player's move resolves against its target, or (untargeted) the nearest villain; each villain only fights the player
+    if (player.action) this.actionStep(dt, player, this.foeFor(player));
+    for (const e of enemies) this.actionStep(dt, e, player);
+    this.updateProjectiles(dt, all);
     this.updateBeam(dt); this.updateEyeBeam(dt);
-    for (const h of [player, enemy]) {
+    for (const h of all) {
       if (h.ragdoll) this.ragdollStep(dt, h);
       if (h.grabbedBy) this.carryStep(h.grabbedBy, h);
       if (h.legGrabbedBy) this.legSwingStep(dt, h.legGrabbedBy, h);
       if (h.slammedBy) this.slamCarry(h.slammedBy, h);
     }
+  }
+  foeFor(P) {
+    const act = P.action;
+    if (act?.type === 'counter' && act.target) return act.target;
+    if (P.grabbing) return P.grabbing;
+    if (act?.target && !act.target.ko) return act.target;
+    let best = null, bd = 1e9; const c = this.chest(P, t1);
+    for (const e of this.enemies) { if (e.ko) continue; const d = this.chest(e, t2).distanceTo(c); if (d < bd) { bd = d; best = e; } }
+    return best || this.enemies[0];
   }
   actionStep(dt, a, b) {
     const act = a.action; if (!act) return;
@@ -349,12 +419,13 @@ export class Combat {
         const to = tc.addScaledVector(act.target.vel, tti).sub(ac).normalize();
         if (!act.soft || to.dot(a.aim) > TACKLE.assistMinDot) { a.aim.lerp(to, 1 - Math.exp(-dt * (act.soft ? TACKLE.assistTurn : TACKLE.lockTurn))).normalize(); act.homing = true; }
       }
-      if (!a.grabbing && !b.ko && !b.ragdoll) {
+      for (const v of (a === this.player ? [b, ...this.enemies.filter(e => e !== b)] : [b])) {
+        if (a.grabbing || v.ko || v.ragdoll || v.grabbedBy) continue;
         // swept test (at 250+ m/s the attacker moves several metres per frame)
-        const cb = this.chest(b, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(b.vel).multiplyScalar(dt), L = rel.length();
+        const cb = this.chest(v, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(v.vel).multiplyScalar(dt), L = rel.length();
         const c0 = t4.copy(c1).sub(rel); let d;
         if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
-        if (d < (a === this.player ? TACKLE.playerCatchR : TACKLE.catchR)) this.grab(a, b);
+        if (d < (a === this.player ? TACKLE.playerCatchR : TACKLE.catchR)) this.grab(a, v);
       }
       if (a.grabbing) {
         act.grabT = (act.grabT || 0) + dt;
@@ -387,12 +458,13 @@ export class Combat {
     if (b.ko) { this.releaseGrab(a); return; }
     act.mode = 'hold'; act.holdT = 0; b.endSuper?.(); a.endSuper?.(); b.ragdoll = null;
     a.vel.multiplyScalar(0.25);
-    if (a !== this.player) { const B = this.ai; B.chokeT = 1 + Math.random() * 2; B.chokeOpt = ['punch', 'spin', 'drive'][Math.floor(Math.random() * 3)]; B.chokeCharge = 0.45 + Math.random() * 0.55; }
+    if (a !== this.player) { const B = this.brainOf(a); B.chokeT = 1 + Math.random() * 2; B.chokeOpt = ['punch', 'spin', 'drive'][Math.floor(Math.random() * 3)]; B.chokeCharge = 0.45 + Math.random() * 0.55; }
     this.shakeNear(a.pos, 0.3 + rel / 400); this.fx.flash(this.chest(b, t2), a.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 30, 0.2);
     this.burst(this.chest(b, V()), a, 30, 10);
   }
   carryStep(att, victim) {
     const act = att.action; if (!act) { this.releaseGrab(att); return; }
+    if (act.mode === 'slam') return; // placed by faceSlamStep
     if (act.mode && act.mode !== 'drive') { this.holdStep(att, victim); return; }
     const dir = act.carryDir;
     const target = this.chest(att, t1).addScaledVector(dir, 1.7).setY(att.pos.y + 0.1);
@@ -422,13 +494,14 @@ export class Combat {
   }
   // ---- choke hold options (player: X charged punch / B spin throw / LS forward drive; AI picks after 1-3 s) ----
   chokeStep(dt, a, b) {
-    const act = a.action, isP = a === this.player, inp = isP ? this.pInp : null, B = this.ai;
+    const act = a.action, isP = a === this.player, inp = isP ? this.pInp : null, B = isP ? null : this.brainOf(a);
     act.holdT += dt;
     const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
     if (act.mode === 'hold') {
       let pick = null;
-      if (isP && inp) { if (inp.punchPressed) pick = 'punch'; else if (inp.cancelPressed) pick = 'spin'; else if (inp.moveY > CHOKE.driveStick) pick = 'drive'; }
+      if (isP && inp) { if (inp.jumpPressed) pick = 'slam'; else if (inp.punchPressed) pick = 'punch'; else if (inp.cancelPressed) pick = 'spin'; else if (inp.moveY > CHOKE.driveStick) pick = 'drive'; }
       else if (!isP && act.holdT > B.chokeT) pick = B.chokeOpt;
+      if (pick === 'slam') { this.startFaceSlam(a, b, act); return; }
       if (pick === 'punch') { act.mode = 'punch'; act.charge = 0; }
       else if (pick === 'spin') { act.mode = 'spin'; act.spinT = 0; act.spinRate = 0; }
       else if (pick === 'drive') {
@@ -445,6 +518,7 @@ export class Combat {
       if (!pick && act.holdT >= CHOKE.hold) { this.breakFree(a, b); return; }
       return;
     }
+    if (act.mode === 'slam') { this.faceSlamStep(dt, a, b, act); return; }
     if (act.mode === 'punch') {
       const fire = a.def.style === 'fire';
       if (act.strikeT === undefined) {
@@ -462,7 +536,7 @@ export class Combat {
         const dir = (isP ? this.camFwd.clone().setY(Math.max(-0.2, this.camFwd.y)) : F.clone()).normalize(); dir.y += 0.15; dir.normalize();
         const hp = this.chest(b, V());
         this.releaseGrab(a); act.t = act.dur - 0.3; // keep the follow-through pose briefly
-        this.damage(b, 12 + 33 * c, a, 'chargedPunch', { charge: +c.toFixed(2) });
+        this.damage(b, 12 + 33 * c, a, 'chargedPunch', { charge: +c.toFixed(2) }); this.punchSfx(0.5 + 0.5 * c, a, b);
         b.vel.copy(dir).multiplyScalar((80 + 180 * c) / b.def.mass); this.startRagdoll(b, 14);
         this.fx.shockwaveOriented?.(hp, dir, fire ? 0xff8a30 : 0xfff2c8, 18 + 45 * c, 0.6, 0.85);
         this.fx.shockwave(hp.clone().setY(Math.max(0, hp.y - 1)), fire ? 0xff7020 : 0xe8e2d0, 15 + 30 * c);
@@ -490,6 +564,53 @@ export class Combat {
       }
     }
   }
+  // ---- choke option A: super-fast face-first slam into the ground ----
+  startFaceSlam(a, b, act) {
+    const F = V(Math.sin(a.yaw), 0, Math.cos(a.yaw)), g = this.city.heightAt(a.pos.x + F.x, a.pos.z + F.z, 0.5);
+    act.mode = 'slam'; act.slam = { t: 0, F, carry: a.vel.length(), v: SLAM.base, top: Math.max(a.pos.y, g + SLAM.lift) + 1.2, y0: a.pos.y, h0: 0, p: a.pos.clone() };
+    this.hud?.say('FACE SLAM!'); whooshSound(a.def.style === 'fire');
+    this.stats.hits.push({ t: this.t, kind: 'faceSlamStart', amount: 0, target: b.key, attacker: a.key });
+  }
+  faceSlamStep(dt, a, b, act) {
+    const S = act.slam, F = S.F; S.t += dt;
+    const fire = a.def.style === 'fire';
+    if (S.t < SLAM.windup) { // rear up with them, then drive down
+      const u = S.t / SLAM.windup; S.p.y += (S.top - S.p.y) * Math.min(1, dt * 25); a.pos.copy(S.p); a.rig.root.position.copy(a.pos); a.vel.set(0, 0, 0); // kinematic: Hero.update can't double-move it
+      a.slamLean = -0.3 * u; b.faceSlamPitch = 0.6 * u; this.placeSlamVictim(a, b, F, 0.6 * u);
+      S.h0 = a.pos.y - this.city.heightAt(a.pos.x + F.x * 0.9, a.pos.z + F.z * 0.9, 0.5);
+      return;
+    }
+    const dir = V(F.x * SLAM.angle, -1, F.z * SLAM.angle).normalize();
+    S.v = Math.min(SLAM.maxSpeed, S.v + SLAM.accel * dt);
+    S.p.addScaledVector(dir, S.v * dt); a.pos.copy(S.p); a.vel.set(0, 0, 0); a.state = 'fly'; a.slamSpeed = S.v; a.rig.root.position.copy(a.pos); // (already animated this frame: keep the mesh on the kinematic path)
+    a.slamLean = 0.95; b.faceSlamPitch = 2.25; this.placeSlamVictim(a, b, F, 2.25);
+    const head = t3.copy(b.pos).addScaledVector(F, 0.6); head.y += 0.45 * b.def.height / 1.83;
+    const fl = this.city.heightAt(head.x, head.z, 0.5);
+    // speed trail
+    const P = fire ? this.fx.fire : this.fx.spark, c0 = fire ? this.cFire0 : this.cGold0, c1 = fire ? this.cFire1 : this.cGold1;
+    for (let i = 0; i < 8; i++) P.emit(t4.copy(head).add(t2.set((Math.random() - .5) * 0.8, Math.random() * 2.5, (Math.random() - .5) * 0.8)), t1.set(0, 10 + Math.random() * 12, 0), 0.12 + Math.random() * 0.12, c0, c1);
+    if (head.y > fl + 0.12 && S.t < 2.5) return;
+    // impact: crater, dust plume and damage all scale with the dive momentum
+    const speed = S.v + 0.5 * S.carry, pt = V(head.x, fl, head.z);
+    this.releaseGrab(a); a.action = null; a.slamLean = 0; a.slamSpeed = 0;
+    b.faceSlamPitch = undefined; b.pos.set(head.x - F.x * 0.6, fl + 0.05, head.z - F.z * 0.6);
+    const dmg = this.damage(b, Math.min(SLAM.dmgMax, SLAM.dmg0 + SLAM.dmgK * speed), a, 'faceSlam', { speed: Math.round(speed), cap: SLAM.dmgMax, height: +S.h0.toFixed(1) });
+    const cp = this.fx.crash(pt.clone(), V(0, 1, 0), mom(speed * 1.25, b), 'ground');
+    this.fx.dustBurst(pt, Math.round(80 + speed * SLAM.dustK), 18 + speed * 0.07);
+    this.fx.shockwave(pt.clone().setY(fl + 0.1), 0xd8d0c0, Math.min(90, 12 + speed * 0.22));
+    this.fx.impact(pt.clone().setY(fl + 0.3), V(0, 1, 0), clamp(speed / 100, 0.6, 3), false);
+    this.fx.flash(pt.clone().setY(fl + 1), fire ? 0xff7020 : 0xfff0c0, 120 + speed * 0.4, 0.4);
+    this.burst(pt.clone().setY(fl + 0.5), a, 120, 26); this.shakeNear(pt, Math.max(0.7, this.fx.crashShake(cp)));
+    this.punchSfx(1, a, b);
+    if (!b.ko) { b.vel.set(F.x * 3, 4, F.z * 3); b.rig.body.rotation.set(1.5, 0, 0); this.startRagdoll(b, 2); b.ragdoll.down = SLAM.down; b.ragdoll.slam = true; b.ragdoll.av.multiplyScalar(0.3); }
+    a.pos.y = Math.max(a.pos.y, fl + 0.2); a.vel.set(-F.x * 4, 7, -F.z * 4); a.state = 'air'; a.knockT = 0.12;
+    if (a === this.player) a.fovKick = (a.fovKick || 0) + 12;
+    this.slams = (this.slams || 0) + 1; this.lastSlam = { speed: Math.round(speed), dmg, height: +S.h0.toFixed(1), crater: this.fx.destruction?.lastCrash?.craterR ?? 0, dust: this.fx.destruction?.lastCrash?.dust ?? 0, t: this.t };
+  }
+  placeSlamVictim(a, b, F, pitch) { // held by the back of the neck in front of / below the fist, face toward the ground
+    b.pos.copy(a.pos).addScaledVector(F, 0.85 - 0.25 * Math.min(1, pitch / 2.25)); b.pos.y += 0.35 - 0.75 * Math.min(1, pitch / 2.25);
+    b.vel.set(0, 0, 0); b.yaw = a.yaw; b.state = 'air'; b.knockT = 0.2; b.action = null;
+  }
   // ---- grab counter (player only) ----
   canCounter(h) {
     if (h !== this.player || h.ko || h.action?.type === 'counter') return false;
@@ -505,7 +626,7 @@ export class Combat {
     a.yaw = yaw; a.aim.set(Math.sin(yaw), 0, Math.cos(yaw)); a.vel.set(0, 0, 0);
     a.action = { type: 'leggrab', t: 0, dur: LEG.dur, rate: 0, thrown: false, victim: v, y0: a.pos.y };
     a.legGrabbing = v; v.legGrabbedBy = a; v.state = 'air'; v.legAlpha = -Math.PI + 0.9;
-    this.ai.legCd = LEG.cd; this.lastCombat = this.t;
+    if (a !== this.player) { this.brainOf(a).legCd = LEG.cd; for (const e of this.enemies) if (e !== a) { const b2 = this.brainOf(e); b2.legCd = Math.max(b2.legCd, 3); } } this.lastCombat = this.t;
     this.stats.hits.push({ t: this.t, kind: 'legGrab', amount: 0, target: v.key, attacker: a.key });
     if (v === this.player) this.hud?.say(`${a.def.name} grabbed your leg! Y to counter`);
     whooshSound(a.def.style === 'fire');
@@ -559,7 +680,7 @@ export class Combat {
       if (a.legGrabbing === v) { a.legGrabbing = null; a.action = null; }
       v.legGrabbedBy = null; v.legAlpha = undefined;
       const hp = this.chest(a, V()), dir = V(a.pos.x - v.pos.x, 0, a.pos.z - v.pos.z); if (dir.lengthSq() < 1e-4) dir.set(Math.sin(a.yaw), 0, Math.cos(a.yaw)); dir.normalize(); dir.y = C.up; dir.normalize();
-      this.damage(a, C.dmg, v, 'counterPunch', { speed: C.speed });
+      this.damage(a, C.dmg, v, 'counterPunch', { speed: C.speed }); this.punchSfx(1, v, a);
       a.vel.copy(dir).multiplyScalar(C.speed / a.def.mass); this.startRagdoll(a, 12);
       v.state = 'air'; v.vel.copy(dir).multiplyScalar(-10); v.vel.y = 9; v.flip = { t: 0, dur: C.flipDur, q0 };
       this.fx.flash(hp, v.def.style === 'fire' ? 0xff7020 : 0xfff0c0, 150, 0.35); this.fx.shockwaveOriented?.(hp, dir, 0xfff2c8, 28, 0.5, 0.8);
@@ -591,7 +712,7 @@ export class Combat {
         act.done = true; tgt.slammedBy = null;
         const dir = F.clone(); dir.y += C.up; dir.normalize();
         const hp = this.chest(tgt, V()).addScaledVector(F, -0.3);
-        this.damage(tgt, C.dmg, a, 'counterKick', { speed: C.speed });
+        this.damage(tgt, C.dmg, a, 'counterKick', { speed: C.speed }); this.punchSfx(1, a, tgt);
         tgt.vel.copy(dir).multiplyScalar(C.speed / tgt.def.mass); this.startRagdoll(tgt, 13);
         this.fx.shockwaveOriented?.(hp, dir, 0xfff2c8, 34, 0.55, 0.85);
         this.fx.shockwave(hp.clone().setY(Math.max(0, hp.y - 1)), 0xe8e2d0, 26);
@@ -606,7 +727,7 @@ export class Combat {
       if (!act.done && act.t >= C.slamAt && tgt.slammedBy === a) { // hurl them straight down into the ground in front
         act.done = true; tgt.slammedBy = null; tgt.slamPitch = 0;
         const hp = this.chest(tgt, V());
-        this.damage(tgt, C.dmg, a, 'counterSlam', { speed: C.down });
+        this.damage(tgt, C.dmg, a, 'counterSlam', { speed: C.down }); this.punchSfx(0.9, a, tgt);
         tgt.vel.copy(F).multiplyScalar(C.fwd); tgt.vel.y = -C.down / tgt.def.mass; this.startRagdoll(tgt, 9);
         tgt.ragdoll.slam = true;
         this.fx.shockwaveOriented?.(hp, V(0, -1, 0), 0xff8a30, 26, 0.5, 0.8); this.fx.flash(hp, 0xff7020, 120, 0.3);
@@ -664,8 +785,10 @@ export class Combat {
     return true;
   }
   // HUD state for the grab timer / prompts
-  grabState(player, enemy) {
-    for (const [a, role] of [[player, 'attacker'], [enemy, 'victim']]) {
+  grabState(player, enemies) {
+    if (!Array.isArray(enemies)) enemies = [enemies];
+    for (const [a, role] of [[player, 'attacker'], ...enemies.map(e => [e, 'victim'])]) {
+      if (role === 'victim' && a.grabbing !== player) continue;
       const act = a.action; if (act?.type === 'tackle' && act.mode && act.mode !== 'drive' && a.grabbing) return { role, mode: act.mode, left: Math.max(0, CHOKE.hold - act.holdT), max: CHOKE.hold, charge: act.charge || 0 };
     }
     return null;
@@ -681,6 +804,7 @@ export class Combat {
     const sp = act?.dashed ? clamp(Math.max(rel, dbase - b.vel.dot(to)), 0, dbase + 20) : Math.max(0, rel);
     const L = act?.lunge ? DASH.impact : null, fire = a.def.style === 'fire';
     const dmg = this.damage(b, 9 + 0.24 * sp + (L ? L.dmgBonus : 0), a, 'punch', { speed: sp, lunge: !!L });
+    this.punchSfx(L ? 1 : clamp(sp / 160, 0.2, 0.9), a, b);
     const dir = to.clone(); dir.y = Math.max(dir.y, 0);
     if (L) this.knockback(b, dir, L.kb + L.kbSpeed * sp, L.up, true, L.spin); else this.knockback(b, dir, 48 + 0.5 * sp, 0.3, true, 10);
     const hp = cb.clone().addScaledVector(to, -0.4);
@@ -696,6 +820,11 @@ export class Combat {
     this.burst(hp, a, 60, 16);
     this.shakeNear(hp, 0.55);
     return dmg;
+  }
+  // melee impact sound: rotating punch clips (audio.js picks a different one each time, +-6% pitch); logged for tests
+  punchSfx(power, a, b) {
+    const i = punchSound(power); this.sfxLog = this.sfxLog || []; this.sfxLog.push({ t: +this.t.toFixed(3), clip: i, power: +power.toFixed(2), by: a?.key, on: b?.key });
+    if (this.sfxLog.length > 60) this.sfxLog.shift();
   }
   burst(p, a, n, s) {
     const fire = a.def.style === 'fire', P = fire ? this.fx.fire : this.fx.spark, c0 = fire ? this.cFire0 : this.cGold0, c1 = fire ? this.cFire1 : this.cGold1;
@@ -713,10 +842,10 @@ export class Combat {
   eyeBeamStep(dt, a, b, act) {
     const roar = a.def.style === 'fire', C = roar ? ROAR : EYE, kind = roar ? 'roar' : 'eyebeam';
     const isP = a === this.player, inp = isP ? this.pInp : null;
-    if (roar && !act.sfx) act.sfx = roarSound() || { stop() {} };
+    if (!act.sfx) act.sfx = (roar ? roarSound() : laserSound()) || { stop() {} }; // roar sample / laser start -> loop -> tail
     a.eyeGlow = Math.min(1, act.t / C.charge);
     const mid = this.beamOrigin(a, V());
-    const lock = isP ? this.lockTarget(b) : null;
+    const lock = isP ? this.lockTarget() : null;
     let dir;
     if (lock) dir = this.chest(b, V()).sub(mid).normalize();
     else { const fwd = isP && this.camFwd ? this.camFwd : a.aim; const to = this.chest(b, V()).sub(mid); const d = to.length(); to.divideScalar(d || 1);
@@ -739,9 +868,15 @@ export class Combat {
       if (p.y < 0) { len = s; hit = 'ground'; break; }
       if (this.city.heightAt(p.x, p.z) > p.y) { len = s; hit = 'wall'; break; }
     }
-    const cb = this.chest(b, t2), tc = clamp(t1.copy(cb).sub(mid).dot(dir), 0, C.range);
-    const hitR = roar ? C.r0 + C.spread * tc + C.body : C.hitR;
-    if (!b.ko && tc < len && t3.copy(mid).addScaledVector(dir, tc).distanceTo(cb) < hitR) { len = tc; hit = 'enemy'; }
+    // the first villain along the beam takes it (either villain, not only the aimed one)
+    let cb = null, hv = null;
+    for (const v of (isP ? this.enemies : [b])) {
+      if (!v || v.ko || v === a) continue;
+      const c = this.chest(v, V()), tc = clamp(t1.copy(c).sub(mid).dot(dir), 0, C.range);
+      const hitR = roar ? C.r0 + C.spread * tc + C.body : C.hitR;
+      if (tc < len && t3.copy(mid).addScaledVector(dir, tc).distanceTo(c) < hitR) { len = tc; hit = 'enemy'; cb = c; hv = v; }
+    }
+    if (hv) { if (act.hitHero && act.hitHero !== hv) act.hitT = 0; act.hitHero = hv; b = hv; }
     const end = mid.clone().addScaledVector(dir, len), imp = hit === 'enemy' ? cb.clone() : end;
     a.beamTarget = end; this.eyeBeam = { owner: a, on: true, end, imp, dir, len, t: act.onT, hit, roar, sfx: act.sfx };
     if (a.state === 'fly') a.vel.addScaledVector(dir, -5 * dt); // recoil
@@ -770,7 +905,7 @@ export class Combat {
     }
     if (this.fx.lightT <= 0.05) { this.fx.light.position.copy(roar ? mid.clone().lerp(end, 0.3) : end); this.fx.light.color.setHex(roar ? 0xff6a20 : 0xfff0c8); this.fx.light.intensity = roar ? 420 : 260; this.fx.lightT = 0.06; this.fx.lightDur = 0.06; }
     const release = (isP ? !(inp && inp.blast) : true) && act.onT >= C.min;
-    if (release || act.onT >= C.max) this.endEyeBeam(a, b, act, dir, imp);
+    if (release || act.onT >= C.max) this.endEyeBeam(a, act.hitHero || b, act, dir, imp);
   }
   endEyeBeam(a, b, act, dir, end) {
     const roar = a.def.style === 'fire', kind = roar ? 'roar' : 'eyebeam';
@@ -955,7 +1090,7 @@ export class Combat {
     // get back up
     const resting = onGround && h.vel.length() < 1.2;
     if (resting) rd.rest += dt; else if (rd.getUp <= 0) rd.rest = 0;
-    if (!h.ko && rd.rest > 0.6 && rd.t > 1.0) {
+    if (!h.ko && rd.rest > 0.6 && rd.t > (rd.down || 1.0)) { // (face slam: stays down longer)
       if (rd.getUp <= 0) rd.q0 = rd.q.clone();
       rd.getUp += dt / 0.65;
       rd.q.copy(rd.q0).slerp(new THREE.Quaternion(), Math.min(1, rd.getUp * rd.getUp * (3 - 2 * rd.getUp)));
@@ -966,17 +1101,38 @@ export class Combat {
     }
   }
 
-  // ---------- AI opponent ----------
+  // ---------- AI villains ----------
+  // Coordination: only one villain may be tackling / choking / leg-grabbing at a time (and never while the player is already
+  // held), attack starts are staggered by VILLAIN_AI.gap, and a 'lead' villain rushes in while the other circles wider on
+  // the opposite side, swapping roles every few seconds.
+  grabBusy(ai) {
+    const P = this.player;
+    if (P && (P.grabbedBy || P.legGrabbedBy || P.slammedBy)) return true;
+    return this.enemies.some(e => e !== ai && (e.grabbing || e.legGrabbing || e.action?.type === 'tackle' || e.action?.type === 'leggrab'));
+  }
+  canStartAttack(ai) { return this.t - this.coord.lastAtk >= VILLAIN_AI.gap; }
+  aiStart(ai, type, dir) {
+    if (!this.canStartAttack(ai)) return false;
+    if (type === 'tackle' && this.grabBusy(ai)) return false;
+    const ok = this.start(ai, type, dir);
+    if (ok) { this.coord.lastAtk = this.t; this.coord.starts.push({ t: +this.t.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
+    return ok;
+  }
   aiInput(dt, ai, player) {
-    const B = this.ai; B.t += dt;
+    const B = this.brainOf(ai); B.t += dt;
     const inp = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
     B.legCd -= dt;
-    if (ai.grabbing || ai.legGrabbing) { this.aiCam.yawFacing = ai.yaw; return inp; } // holding someone: the choke / swing logic decides
+    // roles: one villain leads (rushes), the other supports (circles wide); swap every few seconds or when one is down
+    const C = this.coord, alive = this.alive();
+    if (ai === this.enemies[0]) { C.leadT -= dt; if (C.leadT <= 0) { C.lead = (C.lead + 1) % Math.max(1, this.enemies.length); C.leadT = VILLAIN_AI.lead0 + Math.random() * (VILLAIN_AI.lead1 - VILLAIN_AI.lead0); } }
+    const lead = alive.length < 2 || this.enemies[C.lead] === ai || this.enemies[C.lead]?.ko;
+    const c = ai.aiCam;
+    if (ai.grabbing || ai.legGrabbing) { c.yawFacing = ai.yaw; return inp; } // holding someone: the choke / swing logic decides
     if (ai.ko || ai.ragdoll || ai.grabbedBy || ai.legGrabbedBy || this.aiOff) return inp;
     const me = this.chest(ai, V()), tgt = this.chest(player, V());
     const to = tgt.clone().sub(me); const d = to.length(); const dir = to.clone().divideScalar(d || 1);
     const flat = V(to.x, 0, to.z); const fd = flat.length(); if (fd > 1e-3) flat.divideScalar(fd); else flat.set(Math.sin(ai.yaw), 0, Math.cos(ai.yaw));
-    const c = this.aiCam; c.flatForward.copy(flat); c.right.set(-flat.z, 0, flat.x); c.yawFacing = Math.atan2(flat.x, flat.z);
+    c.flatForward.copy(flat); c.right.set(-flat.z, 0, flat.x); c.yawFacing = Math.atan2(flat.x, flat.z);
     if (player.ko) { // idle: back off a little and hover/stand
       c.forward.copy(flat); inp.moveY = d < 25 ? -0.5 : 0; return inp;
     }
@@ -985,47 +1141,52 @@ export class Combat {
     if (playerAir || fd > 70 || (this.city.heightAt(ai.pos.x + flat.x * 8, ai.pos.z + flat.z * 8) > ai.pos.y + 1 && fd > 12)) B.flyHold = 2.5; else B.flyHold -= dt;
     if (B.flyHold > 0 && ai.state === 'ground' && !ai.action) ai.forceFly();
     if (B.flyHold <= 0 && ai.state === 'fly') { inp.descend = 1; }
-    // keep fighting distance: approach, circle, sometimes rush in
-    B.strafeT -= dt; if (B.strafeT < 0) { B.strafe = Math.random() < 0.5 ? -1 : 1; B.strafeT = 1.5 + Math.random() * 2; }
+    // keep fighting distance: the lead approaches / rushes, the support circles wider on its own side
+    B.strafeT -= dt; if (B.strafeT < 0) { B.strafe = (Math.random() < 0.7 ? 1 : -1) * (B.i ? -1 : 1); B.strafeT = 1.5 + Math.random() * 2; }
     B.think -= dt;
-    const ideal = B.mode === 'rush' ? 2.2 : 16;
+    const busy = this.grabBusy(ai);
+    const ideal = !lead || busy ? VILLAIN_AI.supportDist : B.mode === 'rush' ? 2.2 : 16;
     let fwd = d > ideal + 4 ? 1 : d < ideal - 4 ? -0.7 : 0;
-    const side = B.mode === 'rush' ? 0 : B.strafe * (d < 40 ? 0.8 : 0.2);
+    let side = B.mode === 'rush' && lead ? 0 : B.strafe * (d < 40 ? 0.8 : 0.2);
+    // keep apart from the other villain (no stacking on the same spot)
+    for (const o of this.enemies) { if (o === ai || o.ko) continue; const sep = t1.copy(ai.pos).sub(o.pos); const sd = sep.length();
+      if (sd < VILLAIN_AI.sep && sd > 1e-3) side += clamp(sep.dot(c.right) / sd, -1, 1) * (1 - sd / VILLAIN_AI.sep) * 1.5; }
+    side = clamp(side, -1, 1);
     if (ai.state === 'fly') { // 3D steering toward an offset point near the player
-      const goal = tgt.clone().addScaledVector(dir, -ideal); goal.y = Math.max(goal.y, playerAir ? tgt.y : 1.5);
+      const off = t2.copy(c.right).multiplyScalar(lead ? 0 : (B.i ? -1 : 1) * ideal * 0.6);
+      const goal = tgt.clone().addScaledVector(dir, -ideal).add(off); goal.y = Math.max(goal.y, playerAir ? tgt.y : 1.5);
       const g = goal.sub(me); const gl = g.length(); c.forward.copy(gl > 1e-3 ? g.divideScalar(gl) : dir);
       fwd = clamp(gl / 6, 0, 1); inp.boost = gl > 90 ? 1 : 0;
       if (B.flyHold <= 0) { inp.descend = 1; fwd *= 0.5; }
-    } else { c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; if (!ai.superSprint && fd > 60 && !ai.action && Math.random() < dt * 0.8) inp.superPressed = true; } // the rival super-sprints too
+    } else { c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; if (!ai.superSprint && fd > 60 && !ai.action && Math.random() < dt * 0.8) inp.superPressed = true; } // villains super-sprint too
     inp.moveY = fwd; inp.moveX = side;
     // dodge when the player attacks nearby
     const pa = player.action;
     if (pa && pa.t < 0.12 && !B.dodged && d < 35 && ai.cd.dodge <= 0 && Math.random() < 0.45) {
       B.dodged = true; ai.cd.dodge = 2.5; B.dodgeT = B.t;
       const sd = c.right.clone().multiplyScalar(B.strafe * (ai.state === 'fly' ? 45 : 28)); ai.vel.add(sd); if (ai.state === 'ground') { ai.vel.y = 9; ai.state = 'air'; }
-      if (ai.def.style === 'fire') ai.fireBurst(ai.pos, 25, 8); else this.fx.dustBurst(ai.pos, 12, 6);
+      this.fx.dustBurst(ai.pos, 12, 6);
     }
     if (!pa) B.dodged = false;
-    // attacks (same moveset, with cooldowns + reaction delay)
-    // leg grab (rival only): close in, the player streaking past, or straight after a dodge
+    // leg grab: close in, the player streaking past, or straight after a dodge (one grabber at a time)
     const pFree = !player.ko && !player.ragdoll && !player.grabbedBy && !player.legGrabbedBy && !player.grabbing && player.action?.type !== 'counter' && !(player.invulnT > 0);
-    if (B.legCd <= 0 && pFree && this.canAct(ai) && !this.legOff) {
+    if (B.legCd <= 0 && pFree && this.canAct(ai) && !this.legOff && !busy && this.canStartAttack(ai)) {
       const pv = player.vel.length(), passing = d < LEG.passRange && pv > LEG.passSpeed, close = d < LEG.range, afterDodge = B.t - B.dodgeT < 0.8 && d < LEG.passRange;
       if (close || passing || afterDodge) {
         const ch = afterDodge ? LEG.dodgeChance : passing ? LEG.passChance : LEG.chance;
-        if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); return inp; }
+        if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); C.lastAtk = this.t; C.starts.push({ t: +this.t.toFixed(3), key: ai.key, type: 'leggrab' }); return inp; }
         B.legCd = 1.2; // missed the roll: try again a bit later
       }
     }
-    if (B.think <= 0 && this.canAct(ai) && !player.ragdoll) {
+    if (B.think <= 0 && this.canAct(ai) && !player.ragdoll && !(busy && !lead)) {
       B.think = 0.35 + Math.random() * 0.5;
       const r = Math.random();
-      if (d < 4.2 && ai.cd.punch <= 0) { this.start(ai, 'punch', dir); B.mode = 'circle'; }
-      else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < 0.22) { this.start(ai, 'tackle', dir); }
-      // (no ranged blast: Centurion's eye beam and Tiger's roar blast are player-only)
+      if (d < (lead ? 9 : 4.2) && ai.cd.punch <= 0 && !player.grabbedBy && !player.legGrabbedBy) { if (this.aiStart(ai, 'punch', dir)) B.mode = 'circle'; } // (dash punch closes up to 14 m)
+      else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < (lead ? 0.22 : 0.1)) this.aiStart(ai, 'tackle', dir);
+      // (no ranged blast / beams / roar: villains only move, fly, punch and grab)
       else if (r > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
     }
-    if (B.mode === 'rush' && d < 3.5 && ai.cd.punch <= 0 && this.canAct(ai)) { this.start(ai, 'punch', dir); B.mode = 'circle'; }
+    if (B.mode === 'rush' && lead && d < 3.5 && ai.cd.punch <= 0 && this.canAct(ai) && !player.ragdoll && !player.grabbedBy && !player.legGrabbedBy) { if (this.aiStart(ai, 'punch', dir)) B.mode = 'circle'; }
     return inp;
   }
 
@@ -1040,7 +1201,8 @@ export class Combat {
     h.endSuper?.(); h.endSprint?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0; h.landT = 0; h.legAlpha = undefined;
     if (p) h.pos.copy(p); h.vel.set(0, 0, 0); h.rig.body.rotation.set(0, 0, 0); h.state = h.pos.y > 0.5 ? 'air' : 'ground';
   }
-  inCombat(player, enemy) {
-    return this.t - this.lastCombat < 6 || (!enemy.ko && player.pos.distanceTo(enemy.pos) < 90) || player.hp < player.maxHp && this.t - this.lastCombat < 12;
+  inCombat(player, enemies) {
+    if (!Array.isArray(enemies)) enemies = [enemies];
+    return this.t - this.lastCombat < 6 || enemies.some(e => !e.ko && player.pos.distanceTo(e.pos) < 90) || player.hp < player.maxHp && this.t - this.lastCombat < 12;
   }
 }

@@ -28,6 +28,7 @@ export class Input {
       moveX: mx, moveY: my,
       lookX: this.mouseDX * 0.0025 + ax(2) * 3.2 * dt,
       lookY: this.mouseDY * 0.0025 + ax(3) * 2.4 * dt,
+      rsX: (gp ? (gp.axes[2] || 0) : 0) + (k('BracketRight') ? 1 : 0) - (k('BracketLeft') ? 1 : 0), // raw right-stick X (lock-on target flick)
       jump: k('Space') || b(0),
       boost: Math.max(k('ShiftLeft') || k('ShiftRight') ? 1 : 0, b(5) ? 1 : 0),
       descend: Math.max(k('KeyC') || k('ControlLeft') ? 1 : 0, b(4) ? 1 : 0),
