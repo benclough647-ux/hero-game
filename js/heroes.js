@@ -1010,14 +1010,14 @@ export class Hero {
       const airStretch = this.state === 'air' && this.vel.y > 8 ? THREE.MathUtils.clamp(this.vel.y / 80, 0, 0.12) : 0;
       r.squash.scale.y += airStretch;
       // Flight: Centurion nearly horizontal (80–90°), Tiger a shallower lean (60–70°). Bank with turns.
-      const flyPitch = fire ? 1.0 + 0.25 * this.boostBlend : 1.48; // Tiger: chest-up jet stance when cruising, flatter at full burn
+      const flyPitch = fire ? 0.45 + 0.15 * this.boostBlend : 1.48; // Tiger: near-upright jet stance (~26 deg lean cruising, ~34 deg at full burn)
       const runLean = this.useSkin ? 0 : run * 0.2; // the run clip already leans into the sprint
       const chargeLean = this.charge * 0.5;
       const act = this.action;
       const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive', grabbed = !!this.grabbedBy && this.grabbedBy.action?.mode && this.grabbedBy.action.mode !== 'drive';
       this.upright += (((act && (act.type !== 'tackle' || hold)) || grabbed || this.flip ? 1 : 0) - this.upright) * Math.min(1, dt * 10);
       const tackleLean = act && act.type === 'tackle' && !hold ? (this.state === 'fly' ? 0.25 : 0.6) : 0;
-      r.body.rotation.x = fb * (flyPitch - climb * 0.7) * (1 - 0.75 * this.upright) + chargeLean + runLean + tackleLean;
+      r.body.rotation.x = fb * (fire ? Math.max(0.05, flyPitch - climb * 0.35) : flyPitch - climb * 0.7) * (1 - 0.75 * this.upright) + chargeLean + runLean + tackleLean;
       r.body.rotation.z = this.bank * (1 - this.upright);
       if (this.dangleW > 0) r.body.rotation.x = r.body.rotation.x * (1 - this.dangleW) - 0.12 * this.dangleW; // dangling: slight lean back from the throat
       r.body.rotation.y = 0;

@@ -168,35 +168,35 @@ def endeavor_hover(ph):
     d['neck'] = [('rot', X, -2)]; d['head'] = [('rot', X, -4)]
     return pose(d)
 def endeavor_cruise(ph=0.0):
-    """cruising: chest thrust out, shoulders back, arms driven out and back behind him (jets streaming straight back),
-    head up, legs trailing with the right knee bent"""
+    """cruising, propelled while 'standing': the game leans the body only ~26 deg, chest and shoulders lead, head up looking ahead,
+    both arms thrust straight back and slightly down behind him (jets streaming back), legs underneath in a running stride
+    (left knee driven forward, right leg back)"""
     d = {}
     for sd in 'LR':
         s = s_(sd)
         d[f'shoulder.{sd}'] = [('rot', Y, -10 * s)]
-        d[f'upper_arm.{sd}'] = [('aim', (s * 0.58, 0.48, -0.85))]
-        d[f'forearm.{sd}'] = [('aim', (s * 0.42, 0.44, -0.9))]
-        d[f'hand.{sd}'] = [('aim', (s * 0.34, 0.44, -0.9))]
-        d[f'foot.{sd}'] = [('aim', (0, 0.25, -1))]
-    d['thigh.L'] = [('aim', (0.12, 0.14, -1))]; d['shin.L'] = [('aim', (0.05, 0.3, -1))]
-    d['thigh.R'] = [('aim', (-0.1, -0.12, -1))]; d['shin.R'] = [('aim', (-0.02, 0.95, -0.55))]
-    d['spine'] = [('rot', X, -5)]; d['chest'] = [('rot', X, -8)]; d['upper_chest'] = [('rot', X, -7)]
-    d['neck'] = [('rot', X, -16)]; d['head'] = [('rot', X, -24)]
+        d[f'upper_arm.{sd}'] = [('aim', (s * 0.42, 0.76, -0.62))]
+        d[f'forearm.{sd}'] = [('aim', (s * 0.32, 0.76, -0.64))]
+        d[f'hand.{sd}'] = [('aim', (s * 0.26, 0.76, -0.64))]
+    d['thigh.L'] = [('aim', (0.1, -0.5, -1))]; d['shin.L'] = [('aim', (0.04, 0.55, -1))]; d['foot.L'] = [('aim', (0, 0.1, -1))]
+    d['thigh.R'] = [('aim', (-0.1, 0.42, -1))]; d['shin.R'] = [('aim', (-0.02, 0.85, -0.75))]; d['foot.R'] = [('aim', (0, 0.6, -1))]
+    d['spine'] = [('rot', X, -1)]; d['chest'] = [('rot', X, -3)]; d['upper_chest'] = [('rot', X, -2)]
+    d['neck'] = [('rot', X, -8)]; d['head'] = [('rot', X, -12)]
     return pose(d)
 def endeavor_boost():
-    """full burn: arms locked straight back like twin afterburners, fists clenched, legs together and streamlined, head driven forward"""
+    """full burn: a little more lean (~34 deg), arms locked straight back like twin afterburners, fists clenched,
+    tighter stride, head driven forward"""
     d = {}
     for sd in 'LR':
         s = s_(sd)
         d[f'shoulder.{sd}'] = [('rot', Y, -14 * s)]
-        d[f'upper_arm.{sd}'] = [('aim', (s * 0.4, 0.36, -0.93))]
-        d[f'forearm.{sd}'] = [('aim', (s * 0.3, 0.34, -0.95))]
-        d[f'hand.{sd}'] = [('aim', (s * 0.26, 0.34, -0.95))]
-        d[f'thigh.{sd}'] = [('aim', (s * 0.06, 0.1, -1))]
-        d[f'shin.{sd}'] = [('aim', (s * 0.03, 0.34 if sd == 'R' else 0.2, -1))]
-        d[f'foot.{sd}'] = [('aim', (0, 0.35, -1))]
-    d['spine'] = [('rot', X, -3)]; d['chest'] = [('rot', X, -6)]; d['upper_chest'] = [('rot', X, -5)]
-    d['neck'] = [('rot', X, -24)]; d['head'] = [('rot', X, -32)]
+        d[f'upper_arm.{sd}'] = [('aim', (s * 0.3, 0.72, -0.68))]
+        d[f'forearm.{sd}'] = [('aim', (s * 0.24, 0.72, -0.7))]
+        d[f'hand.{sd}'] = [('aim', (s * 0.2, 0.72, -0.7))]
+    d['thigh.L'] = [('aim', (0.08, -0.28, -1))]; d['shin.L'] = [('aim', (0.03, 0.5, -1))]; d['foot.L'] = [('aim', (0, 0.25, -1))]
+    d['thigh.R'] = [('aim', (-0.08, 0.36, -1))]; d['shin.R'] = [('aim', (-0.02, 0.7, -0.9))]; d['foot.R'] = [('aim', (0, 0.6, -1))]
+    d['spine'] = [('rot', X, 0)]; d['chest'] = [('rot', X, -3)]; d['upper_chest'] = [('rot', X, -2)]
+    d['neck'] = [('rot', X, -12)]; d['head'] = [('rot', X, -18)]
     return pose(d)
 N = 48
 clips['fly_hover'] = keyframes('fly_hover', [(f, hover_pose(2 * math.pi * f / N)) for f in range(0, N + 1, 6)], N,
