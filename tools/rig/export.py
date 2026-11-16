@@ -3,7 +3,8 @@ import bpy, sys, os
 args = sys.argv[sys.argv.index('--')+1:]; name = args[0]; src = args[1] if len(args) > 1 else f'{name}_anim'  # e.g. tiger tiger_anim_face
 bpy.ops.wm.open_mainfile(filepath=f'/workspace/hero-game-assets/rig/{src}.blend')
 ao = bpy.data.objects[f'{name}_rig']; body = bpy.data.objects[f'{name}_body']; cape = bpy.data.objects[f'cape_{name}']; moh = bpy.data.objects.get('Mohawk')
-face = bpy.data.objects.get('TigerFaceDetail')  # rigid face details (ears, cheek ruff, fangs) on the head bone
+face = bpy.data.objects.get('TigerFaceDetail') or bpy.data.objects.get('CentFaceDetail')  # rigid face details (ears, ruff/hair, fangs/beard) on the head bone
+eyes = [o for o in bpy.data.objects if o.type == 'EMPTY' and o.name.startswith('eye_emit_')]  # Centurion eye-beam emitters on the head bone
 for o in list(bpy.data.objects):
     if o.type in ('LIGHT', 'CAMERA') or (o.type == 'MESH' and o not in (body, cape, moh, face)): bpy.data.objects.remove(o)
 def sel(objs):
@@ -22,7 +23,7 @@ def tris(o): return sum(len(p.vertices) - 2 for p in o.data.polygons)
 print('TRIS', {o.name: tris(o) for o in [body, cape] + lods + ([moh] if moh else [])})
 for o in (body, cape, *lods):
     for p in o.data.polygons: p.use_smooth = True
-objs = [ao, body, cape] + lods + ([moh] if moh else []) + ([face] if face else [])
+objs = [ao, body, cape] + lods + ([moh] if moh else []) + ([face] if face else []) + eyes
 sel(objs)
 out = f'/workspace/hero-game-assets/rig/{src.replace("_anim", "_skinned")}_png.glb'
 bpy.ops.export_scene.gltf(filepath=out, export_format='GLB', use_selection=True, export_yup=True, export_apply=False,

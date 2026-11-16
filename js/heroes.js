@@ -406,6 +406,12 @@ function headPoints(scene, headBone, root) {
 const frontAt = (pts, x, y, dy, dx) => { let best = null; for (const p of pts) if (Math.abs(p.y - y) < dy && Math.abs(p.x - x) < dx && (!best || p.z > best.z)) best = p; return best; };
 function emitterOn(headBone, root, p, name) { const o = new THREE.Object3D(); o.name = name; headBone.add(o); o.position.copy(headBone.worldToLocal(root.localToWorld(p.clone()))); return o; }
 function findEyes(scene, headBone, root) {
+  // authored emitters (eye_emit_L/R empties on the head bone, placed in the sculpted eye sockets) win over the vertex heuristic
+  const named = ['eye_emit_R', 'eye_emit_L'].map(n => scene.getObjectByName(n));
+  if (named.every(Boolean)) {
+    root.updateMatrixWorld(true);
+    return named.map(o => root.worldToLocal(o.getWorldPosition(new THREE.Vector3()))).sort((a, b) => a.x - b.x).map(p => emitterOn(headBone, root, p, 'eye'));
+  }
   const H = headPoints(scene, headBone, root), out = [];
   if (H.ok) {
     const ey = H.y0 + 0.5 * (H.y1 - H.y0), ex = H.x1 * 0.36;
