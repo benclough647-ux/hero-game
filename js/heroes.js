@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { toToon, addRim, addHullOutlines, RAMP_HERO } from './toon.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -587,10 +586,6 @@ export class Hero {
         (/_lod1$/i.test(o.name) ? lod1 : lod0).push(o);
       }
     });
-    // anime look: cel-shaded skin/costume (textures kept) with a warm rim light, plus inverted-hull ink outlines
-    { const conv = new Map(); for (const o of [...lod0, ...lod1]) { const c = m => { if (!conv.has(m)) conv.set(m, addRim(toToon(m, RAMP_HERO), this.def.style === 'fire' ? 0xffd2a8 : 0xfff6e6, 0.42)); return conv.get(m); };
-        o.material = Array.isArray(o.material) ? o.material.map(c) : c(o.material); }
-      this.ink = addHullOutlines([...lod0, ...lod1], this.def.style === 'fire' ? 0x1e0a08 : 0x141826, 2.0); }
     const B = n => bones[n.replace(/[.\s]/g, '')];
     if (!B('hips') || !B('hand.R')) { console.warn('Rigged model is missing bones, using fallback'); return false; }
     const mixer = new THREE.AnimationMixer(scene);
