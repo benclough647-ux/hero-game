@@ -32,17 +32,18 @@ function noise(t0, dur, type, f0, f1, gain, attack = 0.004) {
   src.connect(f); f.connect(g); g.connect(master); src.start(t0); src.stop(t0 + dur + 0.05);
 }
 // Sonic boom: the classic double crack (N-wave) + a deep thump + rolling rumble; Tiger adds a fiery roar.
-export function sonicBoomSound(fire = false) {
-  unlockAudio(); if (!ctx || ctx.state !== 'running') return;
+export function sonicBoomSound(fire = false, vol = 1) { // vol: distance attenuation for other fliers' booms (villains)
+  unlockAudio(); if (!ctx || ctx.state !== 'running' || vol < 0.02) return;
   const t = ctx.currentTime + 0.01;
-  noise(t, 0.45, 'lowpass', 6000, 180, 1.0, 0.003);
-  noise(t + 0.11, 0.55, 'lowpass', 4500, 120, 0.85, 0.003);
+  noise(t, 0.45, 'lowpass', 6000, 180, 1.0 * vol, 0.003);
+  noise(t + 0.11, 0.55, 'lowpass', 4500, 120, 0.85 * vol, 0.003);
   const o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine';
   o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(28, t + 1.2);
-  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.3);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(Math.max(0.0002, 0.9 * vol), t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.3);
   o.connect(g); g.connect(master); o.start(t); o.stop(t + 1.4);
-  noise(t + 0.05, 2.2, 'lowpass', 260, 60, 0.5, 0.08);
-  if (fire) noise(t, 1.1, 'bandpass', 500, 2400, 0.45, 0.05);
+  noise(t + 0.05, 2.2, 'lowpass', 260, 60, 0.5 * vol, 0.08);
+  if (fire) noise(t, 1.1, 'bandpass', 500, 2400, 0.45 * vol, 0.05);
+  sonicBoomSound.last = { t: ctx.currentTime, vol };
 }
 
 // Temper Tiger's super-speed ignition: a deep fireball boom + roaring flame burst (layered with the sonic boom)

@@ -363,6 +363,8 @@ const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counte
 // rival AI moves a little faster than the player on the same hero (run / sprint / flight / boost / tackle)
 export const AI_SPEED = 1.09;
 // grounded super sprint (LS click on the ground): multiple of run speed
+// villain sonic boom on boost: cooldown (s), audio reference distance (m: half volume at ~ref)
+export const VBOOM = { cd: 4, ref: 60 };
 export const SPRINT = { mult: 3.5, accel: 3.2, stopT: 0.22, boomR: 14 };
 // superhero 'boom' landing: stop dead, then a short recovery before control returns
 export const LANDING = { min: 0.3, max: 0.5, full: 70, softMax: 16 };
@@ -654,6 +656,15 @@ export class Hero {
     sonicBoomSound(fire);
   }
   endSuper() { this.superSpeed = false; this.superIdle = 0; }
+  // villains: the same shockwave ring + vapour cone + boom when they kick into boost flight (no super speed: gameplay unchanged);
+  // the sound is attenuated by the distance to the camera
+  villainBoom() {
+    const dir = this.vel.lengthSq() > 25 ? this.vel.clone().normalize() : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    this.fx.sonicBoom(this.pos.clone().add(new THREE.Vector3(0, 0.4, 0)), dir, { fire: false, follow: this.pos });
+    const cam = this.fx.viewer, d = cam ? cam.position.distanceTo(this.pos) : 0, vol = 1 / (1 + Math.pow(d / VBOOM.ref, 1.5));
+    this.boomCount = (this.boomCount || 0) + 1; this.lastBoom = { d, vol };
+    sonicBoomSound(false, vol);
+  }
 
   // Swap the primitive fallback for loaded LOD meshes. Safe to call once; no-ops if levels are missing.
   adoptModels(levels) {
@@ -1208,6 +1219,11 @@ export class Hero {
     dir.y += (inp.jump ? 1 : 0) - inp.descend;
     const len = Math.min(1, dir.length()); if (len > 0) dir.normalize();
     if (this.superSpeed) { if (len < 0.2) { if ((this.superIdle += dt) > 0.35) this.endSuper(); } else this.superIdle = 0; }
+    if (this.def.villain) { // boost kicked in (rising edge, moving, cooldown): sonic boom
+      this.boomCd = Math.max(0, (this.boomCd || 0) - dt);
+      if (inp.boost > 0.5 && !(this.prevBoost > 0.5) && len > 0.2 && this.boomCd <= 0 && this.visibleFlag !== false) { this.villainBoom(); this.boomCd = VBOOM.cd; }
+      this.prevBoost = inp.boost;
+    }
     const top = this.superSpeed ? d.flyBoost * SUPER_MULT : d.fly + (d.flyBoost - d.fly) * inp.boost;
     const spd = top * len;
     const tgt = dir.multiplyScalar(spd);
