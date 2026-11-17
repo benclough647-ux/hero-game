@@ -129,6 +129,7 @@ function combatFrame(dt, inp) {
   combat.updateLock(dt, P, live, inp);
   const L = combat.lockTarget(); cam.lockTarget = L ? combat.chest(L, lockPt) : null;
   for (const h of [P, ...villains]) if (!free(h)) h.animate(dt, 0);
+  for (const v of villains) if (v.legGrabbing) combat.attachLeg(v); // leg grab: ankle pinned to the palm after both poses are evaluated
   // KO -> respawn (villains come back at full 700 HP a short way off)
   if (P.ko && (P.koT += dt) > 3.2) { combat.reset(P, P.pos.clone().setY(city.heightAt(P.pos.x, P.pos.z))); hud.say('Back on your feet'); }
   for (const v of villains) if (v.ko && (v.koT += dt) > 4) combat.respawnNear(v, P);

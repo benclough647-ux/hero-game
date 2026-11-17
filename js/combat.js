@@ -42,6 +42,9 @@ export const DASH = { speed: 230, max: 90, free: 14, stop: 1.8, maxT: 0.6, assis
   impact: { kb: 120, kbSpeed: 0.55, up: 0.32, spin: 14, dmgBonus: 10 } };
 // rival-only leg grab: when the player is close (or flies past / right after the rival dodges) it seizes a leg, giant-swings
 // them and flings them into a ragdoll tumble. The player has `window` s to counter (Y): curl up and punch the grabber off.
+// pursuit of a fleeing player (moving away from the villain): small cruise-speed bonus (not boost: boosting still escapes),
+// intercept steering toward where the player will be, and a longer leg-grab / tackle catch from behind
+export const PURSUIT = { bonus: 1.1, fleeMin: 15, fleeDot: 0.45, lead: 1.1, leadMax: 1.6, behindR: 6.5, behindChance: 0.5, tackleChance: 0.34, tackleLead: 1.0, behindCatchR: 3.4 };
 export const LEG = { cd: 10, range: 4.2, passRange: 6.5, passSpeed: 25, chance: 0.3, passChance: 0.6, dodgeChance: 0.55,
   window: 1.5, throwAt: 1.55, dur: 1.75, spinMax: 12, spinUp: 1.1, armR: 0.95, armH: 1.25, leg: 0.95,
   throwSpeed: 150, throwUp: 0.3, throwDmg: 26,
@@ -415,7 +418,8 @@ export class Combat {
       if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy) {
         // lead the target: aim where it will be when we arrive (capped), so a moving / strafing rival can still be caught
         const tc = this.chest(act.target, t1), ac = this.chest(a, t2), dist = tc.distanceTo(ac);
-        const tti = Math.min(TACKLE.lead, dist / Math.max(a.mv.tackleSpeed, a.vel.length(), 1));
+        const away = a !== this.player && this.fleeing(a, act.target);
+        const tti = Math.min(away ? PURSUIT.tackleLead : TACKLE.lead, dist / Math.max(a.mv.tackleSpeed, a.vel.length(), 1));
         const to = tc.addScaledVector(act.target.vel, tti).sub(ac).normalize();
         if (!act.soft || to.dot(a.aim) > TACKLE.assistMinDot) { a.aim.lerp(to, 1 - Math.exp(-dt * (act.soft ? TACKLE.assistTurn : TACKLE.lockTurn))).normalize(); act.homing = true; }
       }
@@ -425,7 +429,7 @@ export class Combat {
         const cb = this.chest(v, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(v.vel).multiplyScalar(dt), L = rel.length();
         const c0 = t4.copy(c1).sub(rel); let d;
         if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
-        if (d < (a === this.player ? TACKLE.playerCatchR : TACKLE.catchR)) this.grab(a, v);
+        if (d < (a === this.player ? TACKLE.playerCatchR : this.fleeing(a, v) ? PURSUIT.behindCatchR : TACKLE.catchR)) this.grab(a, v);
       }
       if (a.grabbing) {
         act.grabT = (act.grabT || 0) + dt;
@@ -654,6 +658,45 @@ export class Combat {
     v.pos.copy(hips); v.pos.y -= v.hipH * v.def.height / 1.83; v.yaw = a.yaw + Math.PI; v.legAlpha = th - Math.PI;
     v.vel.set(Math.cos(a.yaw), 0, -Math.sin(a.yaw)).multiplyScalar(act.rate * (LEG.armR + LEG.leg));
     if (!curling && !act.thrown && act.t >= LEG.throwAt) this.legThrow(a, v, act); // no counter in time: fling
+  }
+  // after both poses are evaluated (main.combatFrame): pin the victim's grabbed ankle onto the grabber's palm marker, so the
+  // hand visibly holds the leg on every frame of the grab / spin / hang (legSwingStep only places them approximately)
+  attachLeg(a) {
+    const v = a.legGrabbing, act = a.action, B = a.anim?.B; if (!v || act?.type !== 'leggrab' || !B || !v.anim?.B) return;
+    a.rig.root.updateMatrixWorld(true); v.rig.root.updateMatrixWorld(true);
+    const k = a.def.height / 1.83;
+    if (!a.anim.grip) { // grip points: the middle of the closed hand (a little past the wrist, toward the palm)
+      a.anim.grip = {}; for (const sd of ['R', 'L']) { const hb = B('hand.' + sd); if (!hb) continue; const o = new THREE.Object3D(); o.name = 'grip' + sd;
+        const n = a.anim.hand?.sides?.[sd]?.palmN; o.position.set(0, 0.075 * k, 0); if (n) o.position.addScaledVector(n, 0.025 * k); hb.add(o); a.anim.grip[sd] = o; }
+    }
+    if (!act.pin) { // first frame: the grabber's nearer hand + the victim's nearer ankle (foot bone head = ankle)
+      let best = null;
+      for (const hs of ['R', 'L']) { const gp = a.anim.grip[hs]; if (!gp) continue; const pp = gp.getWorldPosition(V());
+        for (const fs of ['L', 'R']) { const f = v.anim.B('foot.' + fs); if (!f) continue; const d = f.getWorldPosition(V()).distanceTo(pp); if (!best || d < best.d) best = { d, side: hs, palm: gp, foot: f }; } }
+      if (!best) return; act.pin = best; act.gapMax = 0;
+    }
+    // reach: 2-bone IK of the grabbing arm straight out in front of its shoulder (slightly down), so the victim is held at arm's length
+    const up = B('upper_arm.' + act.pin.side), R = V(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    if (up) { const want = up.getWorldPosition(V()).addScaledVector(R, 0.75 * k); want.y -= 0.12 * k; this.armIK(up, B('forearm.' + act.pin.side), act.pin.palm, want); }
+    const P = act.pin.palm.getWorldPosition(V()), d = P.sub(act.pin.foot.getWorldPosition(V()));
+    act.gap0 = d.length(); // how far off the kinematic placement was (before the pin)
+    v.pos.add(d); v.rig.root.position.add(d); v.rig.root.updateMatrixWorld(true);
+    act.gap = act.pin.palm.getWorldPosition(V()).distanceTo(act.pin.foot.getWorldPosition(V())); act.gapMax = Math.max(act.gapMax, act.gap);
+  }
+  // two-bone IK (world space): bend the elbow to the target distance, then swing the upper arm so the end point lands on it
+  armIK(up, fore, end, target) {
+    if (!up || !fore || !end) return;
+    const S = up.getWorldPosition(V()), E = fore.getWorldPosition(V()), W = end.getWorldPosition(V());
+    const l1 = S.distanceTo(E), l2 = E.distanceTo(W), dT = clamp(S.distanceTo(target), Math.abs(l1 - l2) + 1e-3, (l1 + l2) * 0.995);
+    const rot = (bone, q) => { const pw = bone.parent.getWorldQuaternion(new THREE.Quaternion()), bw = bone.getWorldQuaternion(new THREE.Quaternion());
+      bone.quaternion.copy(pw.invert().multiply(q.multiply(bw))); bone.updateMatrixWorld(true); };
+    // elbow: interior angle for distance dT (law of cosines)
+    const e1 = S.clone().sub(E).normalize(), e2 = W.clone().sub(E).normalize();
+    let n = e1.clone().cross(e2); if (n.lengthSq() < 1e-6) n = V(1, 0, 0); n.normalize();
+    const cur = Math.acos(clamp(e1.dot(e2), -1, 1)), des = Math.acos(clamp((l1 * l1 + l2 * l2 - dT * dT) / (2 * l1 * l2), -1, 1));
+    rot(fore, new THREE.Quaternion().setFromAxisAngle(n, des - cur)); // +angle about e1 x e2 swings the forearm away from the upper arm (opens the elbow)
+    const W2 = end.getWorldPosition(V()), a1 = W2.sub(S).normalize(), a2 = target.clone().sub(S).normalize();
+    rot(up, new THREE.Quaternion().setFromUnitVectors(a1, a2));
   }
   legThrow(a, v, act) {
     act.thrown = true; a.legGrabbing = null; v.legGrabbedBy = null; v.legAlpha = undefined;
@@ -1118,6 +1161,12 @@ export class Combat {
     if (ok) { this.coord.lastAtk = this.t; this.coord.starts.push({ t: +this.t.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
     return ok;
   }
+  // the target is flying / running away from `a` (its velocity points away from a): used for the pursuit tweaks (PURSUIT)
+  fleeing(a, v) {
+    const sp = v.vel.length(); if (sp < PURSUIT.fleeMin || this.pursuitOff || v.ragdoll || v.knockT > 0 || v.grabbedBy || v.legGrabbedBy || v.slammedBy) return false; // (thrown / knocked back isn't fleeing) // (pursuitOff: tests compare with the old chase)
+    const dx = v.pos.x - a.pos.x, dy = v.pos.y - a.pos.y, dz = v.pos.z - a.pos.z, dl = Math.hypot(dx, dy, dz) || 1;
+    return (v.vel.x * dx + v.vel.y * dy + v.vel.z * dz) / (sp * dl) > PURSUIT.fleeDot;
+  }
   aiInput(dt, ai, player) {
     const B = this.brainOf(ai); B.t += dt;
     const inp = { moveX: 0, moveY: 0, jump: false, jumpPressed: false, jumpReleased: false, boost: 0, descend: 0, cancelPressed: false };
@@ -1131,6 +1180,13 @@ export class Combat {
     if (ai.ko || ai.ragdoll || ai.grabbedBy || ai.legGrabbedBy || this.aiOff) return inp;
     const me = this.chest(ai, V()), tgt = this.chest(player, V());
     const to = tgt.clone().sub(me); const d = to.length(); const dir = to.clone().divideScalar(d || 1);
+    // pursuit: the player is getting away -> cruise bonus (ramped, not while they super-speed) + steer at the intercept point
+    const flee = !player.ko && this.fleeing(ai, player) && !this.aiOff; B.flee = flee;
+    ai.chaseMul = (ai.chaseMul || 1) + ((flee && !player.superSpeed ? PURSUIT.bonus : 1) - (ai.chaseMul || 1)) * Math.min(1, dt * 3);
+    if (Math.abs(ai.chaseMul - 1) < 1e-3) ai.chaseMul = 1;
+    let chase = tgt; // intercept point (where the fleeing player will be when we close the gap)
+    if (flee) { const close = Math.max(8, ai.vel.length() - player.vel.dot(dir) * 0.5);
+      chase = tgt.clone().addScaledVector(player.vel, Math.min(PURSUIT.leadMax, PURSUIT.lead * d / close)); }
     const flat = V(to.x, 0, to.z); const fd = flat.length(); if (fd > 1e-3) flat.divideScalar(fd); else flat.set(Math.sin(ai.yaw), 0, Math.cos(ai.yaw));
     c.flatForward.copy(flat); c.right.set(-flat.z, 0, flat.x); c.yawFacing = Math.atan2(flat.x, flat.z);
     if (player.ko) { // idle: back off a little and hover/stand
@@ -1145,20 +1201,20 @@ export class Combat {
     B.strafeT -= dt; if (B.strafeT < 0) { B.strafe = (Math.random() < 0.7 ? 1 : -1) * (B.i ? -1 : 1); B.strafeT = 1.5 + Math.random() * 2; }
     B.think -= dt;
     const busy = this.grabBusy(ai);
-    const ideal = !lead || busy ? VILLAIN_AI.supportDist : B.mode === 'rush' ? 2.2 : 16;
+    const ideal = !lead || busy ? VILLAIN_AI.supportDist : B.mode === 'rush' || flee ? 2.2 : 16; // a fleeing player: the lead closes right in
     let fwd = d > ideal + 4 ? 1 : d < ideal - 4 ? -0.7 : 0;
-    let side = B.mode === 'rush' && lead ? 0 : B.strafe * (d < 40 ? 0.8 : 0.2);
+    let side = (B.mode === 'rush' || flee) && lead ? 0 : B.strafe * (d < 40 ? 0.8 : 0.2);
     // keep apart from the other villain (no stacking on the same spot)
     for (const o of this.enemies) { if (o === ai || o.ko) continue; const sep = t1.copy(ai.pos).sub(o.pos); const sd = sep.length();
       if (sd < VILLAIN_AI.sep && sd > 1e-3) side += clamp(sep.dot(c.right) / sd, -1, 1) * (1 - sd / VILLAIN_AI.sep) * 1.5; }
     side = clamp(side, -1, 1);
     if (ai.state === 'fly') { // 3D steering toward an offset point near the player
       const off = t2.copy(c.right).multiplyScalar(lead ? 0 : (B.i ? -1 : 1) * ideal * 0.6);
-      const goal = tgt.clone().addScaledVector(dir, -ideal).add(off); goal.y = Math.max(goal.y, playerAir ? tgt.y : 1.5);
+      const goal = chase.clone().addScaledVector(dir, -ideal).add(off); goal.y = Math.max(goal.y, playerAir ? tgt.y : 1.5);
       const g = goal.sub(me); const gl = g.length(); c.forward.copy(gl > 1e-3 ? g.divideScalar(gl) : dir);
-      fwd = clamp(gl / 6, 0, 1); inp.boost = gl > 90 ? 1 : 0;
+      fwd = clamp(gl / 6, 0, 1); inp.boost = (flee ? d : gl) > 90 ? 1 : 0; // (the intercept point runs far ahead: boost on the real gap)
       if (B.flyHold <= 0) { inp.descend = 1; fwd *= 0.5; }
-    } else { c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; if (!ai.superSprint && fd > 60 && !ai.action && Math.random() < dt * 0.8) inp.superPressed = true; } // villains super-sprint too
+    } else { if (flee) { const cf = t2.set(chase.x - me.x, 0, chase.z - me.z); if (cf.lengthSq() > 1e-4) c.forward.copy(cf.normalize()); else c.forward.copy(flat); } else c.forward.copy(flat); inp.boost = d > 30 ? 1 : 0; if (!ai.superSprint && fd > 60 && !ai.action && Math.random() < dt * 0.8) inp.superPressed = true; } // villains super-sprint too
     inp.moveY = fwd; inp.moveX = side;
     // dodge when the player attacks nearby
     const pa = player.action;
@@ -1171,9 +1227,10 @@ export class Combat {
     // leg grab: close in, the player streaking past, or straight after a dodge (one grabber at a time)
     const pFree = !player.ko && !player.ragdoll && !player.grabbedBy && !player.legGrabbedBy && !player.grabbing && player.action?.type !== 'counter' && !(player.invulnT > 0);
     if (B.legCd <= 0 && pFree && this.canAct(ai) && !this.legOff && !busy && this.canStartAttack(ai)) {
-      const pv = player.vel.length(), passing = d < LEG.passRange && pv > LEG.passSpeed, close = d < LEG.range, afterDodge = B.t - B.dodgeT < 0.8 && d < LEG.passRange;
-      if (close || passing || afterDodge) {
-        const ch = afterDodge ? LEG.dodgeChance : passing ? LEG.passChance : LEG.chance;
+      const pv = player.vel.length(), passing = d < LEG.passRange && pv > LEG.passSpeed && !flee, close = d < LEG.range, afterDodge = B.t - B.dodgeT < 0.8 && d < LEG.passRange;
+      const behind = flee && d < PURSUIT.behindR; // catching up from behind: longer reach, better odds
+      if (close || passing || afterDodge || behind) {
+        const ch = afterDodge ? LEG.dodgeChance : passing ? LEG.passChance : behind ? PURSUIT.behindChance : LEG.chance;
         if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); C.lastAtk = this.t; C.starts.push({ t: +this.t.toFixed(3), key: ai.key, type: 'leggrab' }); return inp; }
         B.legCd = 1.2; // missed the roll: try again a bit later
       }
@@ -1182,7 +1239,7 @@ export class Combat {
       B.think = 0.35 + Math.random() * 0.5;
       const r = Math.random();
       if (d < (lead ? 9 : 4.2) && ai.cd.punch <= 0 && !player.grabbedBy && !player.legGrabbedBy) { if (this.aiStart(ai, 'punch', dir)) B.mode = 'circle'; } // (dash punch closes up to 14 m)
-      else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < (lead ? 0.22 : 0.1)) this.aiStart(ai, 'tackle', dir);
+      else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < (lead ? (flee ? PURSUIT.tackleChance : 0.22) : 0.1)) this.aiStart(ai, 'tackle', dir);
       // (no ranged blast / beams / roar: villains only move, fly, punch and grab)
       else if (r > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
     }

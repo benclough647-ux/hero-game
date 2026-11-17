@@ -369,6 +369,7 @@ export const LANDING = { min: 0.3, max: 0.5, full: 70, softMax: 16 };
 // impact speed -> 'momentum' speed fed to the crater/dust scaling (heavier heroes hit harder)
 export const momentumSpeed = (speed, mass = 1) => speed * (0.6 + 0.4 * mass);
 const AI_KEYS = ['run', 'sprint', 'fly', 'flyBoost', 'tackleSpeed'];
+const CHASE_KEYS = ['run', 'sprint', 'fly']; // the chase bonus leaves flyBoost / tackle alone so boosting away still escapes
 export const MAX_HP = 1000; // each hero's health (bars and HP numbers show /1000)
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _ax = new THREE.Vector3(), _qI = new THREE.Quaternion();
 const _cq = new THREE.Quaternion(), _cp = new THREE.Quaternion(), _cd = new THREE.Quaternion(), _cv = new THREE.Vector3(), _cv2 = new THREE.Vector3(), _cf = new THREE.Vector3(), _cr = new THREE.Vector3(), _cu = new THREE.Vector3(), _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _c3 = new THREE.Vector3(), _c4 = new THREE.Vector3();
@@ -608,7 +609,8 @@ export class Hero {
   // LS while flying: sonic boom, then super speed until you stop flying, let go of the stick, slow down, or press LS again
   get mv() { // movement stats: the rival AI gets AI_SPEED x the player's numbers
     if (this.isPlayer !== false) return this.def;
-    if (!this._aiDef || this._aiDef.base !== this.def) { const m = { ...this.def, base: this.def }; for (const k of AI_KEYS) m[k] = this.def[k] * AI_SPEED; this._aiDef = m; }
+    const cm = this.chaseMul || 1; // pursuit bonus while chasing a fleeing player (combat.aiInput, PURSUIT): cruise speeds only, never boost
+    if (!this._aiDef || this._aiDef.base !== this.def || this._aiDef.cm !== cm) { const m = { ...this.def, base: this.def, cm }; for (const k of AI_KEYS) m[k] = this.def[k] * AI_SPEED * (CHASE_KEYS.includes(k) ? cm : 1); this._aiDef = m; }
     return this._aiDef;
   }
   startSprint() { // grounded super sprint: a small boom on activation
