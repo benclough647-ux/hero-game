@@ -27,7 +27,14 @@ CFG = {
            skin=(200, 136, 104), skin_red=(196, 104, 84), beard=(150, 112, 92), lip=(168, 94, 80),
            hair0=(112, 78, 40), hair1=(198, 158, 98), brow=(122, 84, 50), mst0=(104, 62, 34), mst1=(158, 106, 62),
            iris0=(58, 88, 112), iris1=(128, 160, 184), stubble=0.6, wrinkle=1.8),
+ 'c': dict(sl=dict(jaw_width=.75, chin=.5, cheekbones=.6, brow_ridge=.48, brow_angle=.45, nose_length=.15, nose_width=.2, nose_hump=.1,
+                   nose_depth=.15, eye_narrow=.45, eye_tilt=-.1, lips=-.1, mouth_width=.1, face_length=.15, head_width=.2, temples=.3,
+                   neck_thick=1.15, age=.45, scowl=.5),
+           skin=(168, 120, 96), skin_red=(160, 96, 78), beard=(60, 44, 34), lip=(140, 84, 70),
+           hair0=(16, 11, 8), hair1=(70, 50, 34), brow=(22, 16, 12), mst0=(24, 17, 12), mst1=(96, 70, 48),
+           iris0=(255, 176, 70), iris1=(255, 236, 170), stubble=0.6, wrinkle=1.7, fullbeard=True, glow=True),
 }[VK]
+FB = CFG.get('fullbeard', False)
 bpy.ops.wm.open_mainfile(filepath=f'{D}/base_head.blend')
 sc = bpy.context.scene; h = bpy.data.objects['VHead']; me = h.data; NV = len(me.vertices)
 def getco(m): a = np.zeros(len(m.vertices) * 3); m.vertices.foreach_get('co', a); return a.reshape(-1, 3)
@@ -178,11 +185,18 @@ str1 = np.sin(phi * 230 + 4 * warp) * 0.5 + 0.5; str3 = np.sin(phi * 95 + 2 * wa
 str2 = vnoise(np.stack([phi * 70, along * 3, np.zeros_like(phi)], 1), 1.0)
 clump = np.sin(phi * (26 if VK == 'a' else 20) + 1.2 * fbm(P, 1.4, 2)) * 0.5 + 0.5
 hstr = np.clip(0.35 * str1 + 0.25 * str3 + 0.4 * str2, 0, 1) * (0.55 + 0.45 * clump)
+if VK == 'c': hstr = np.clip(0.15 * str1 + 0.15 * str3 + 0.3 * str2 + 0.5 * fbm(P, 14, 2), 0, 1) * (0.5 + 0.5 * fbm(P, 5, 2))  # tousled, no combed lines
 Hmm += (0.45 * (hstr - 0.5) + 0.35 * (clump - 0.5)) * HM
 macr = x - 0.45 * sgn * (y - 7.6); mstr = np.sin(macr * 260 + 2 * fbm(P, 8, 2)) * 0.5 + 0.5
 Hmm = Hmm * (1 - MM) + MM * (0.4 * (mstr - 0.5) + 0.2)
 bacr = (y - 0.25 * ax) ; bstr = np.sin(bacr * 300 + 2 * fbm(P, 9, 2)) * 0.5 + 0.5
 Hmm = Hmm * (1 - BM_ * 0.8) + BM_ * 0.8 * (0.35 * (bstr - 0.5) + 0.15)
+BD = paint.beard_mask(P) if FB else np.zeros(len(P))
+if FB:  # full beard: downward-flowing strands + clumps (the shell carries the volume)
+    bw = 2.0 * fbm(P, 3, 2); bacr2 = x + 0.25 * sgn * (7.6 - y) * ss(0.2, 0.5, ax)
+    bstr2 = np.clip(0.25 * (np.sin(bacr2 * 240 + 3 * bw) * 0.5 + 0.5) + 0.35 * vnoise(np.stack([bacr2 * 80, y * 6, z], 1), 1.0) + 0.4 * fbm(P, 16, 2), 0, 1)
+    bcl = fbm(P, 7, 2)
+    Hmm = Hmm * (1 - BD) + BD * (0.45 * (bstr2 - 0.5) + 0.4 * (bcl - 0.5))
 # ---- albedo ----
 C = lambda k: srgb(CFG[k])
 col = np.tile(C('skin'), (len(P), 1))
@@ -209,6 +223,9 @@ hm = HM * (1 - EM)
 col = col * (1 - hm[:, None]) + hc * hm[:, None]
 bc = C('brow')[None] * (0.7 + 0.6 * bstr[:, None]); col = col * (1 - BM_[:, None] * 0.92) + bc * BM_[:, None] * 0.92
 mc = C('mst0')[None] * (1 - mstr[:, None]) + C('mst1')[None] * mstr[:, None]; col = col * (1 - MM[:, None]) + mc * MM[:, None]
+if FB:
+    bc2 = C('mst0')[None] * (1 - bstr2[:, None] ** 1.5) + C('mst1')[None] * bstr2[:, None] ** 1.5; bc2 *= (0.55 + 0.6 * bcl)[:, None]
+    col = col * (1 - BD[:, None] * 0.97) + bc2 * BD[:, None] * 0.97
 ALB = np.clip(col, 0, 1).reshape(R, R, 3) ** (1 / 2.2); HMAP = Hmm.reshape(R, R)
 def save(arr, name, flt=False, srgb_=True):
     r = arr.shape[0]; im = bpy.data.images.new(name, r, r, alpha=False, float_buffer=flt); im.colorspace_settings.name = 'sRGB' if srgb_ else 'Non-Color'
@@ -259,6 +276,23 @@ nh = len(hb.faces)
 tmp = bpy.data.meshes.new('hairtmp'); hb.to_mesh(tmp); hb.free(); out.from_mesh(tmp); bpy.data.meshes.remove(tmp)
 ouv = out.loops.layers.uv['UVMap']
 print('HAIR faces', nh)
+if FB:
+    bmv = paint.beard_mask(MHP, soft=1.0)
+    selb = [f for f in bmh.faces if max(bmv[v.index] for v in f.verts) > 0.3]
+    bb = bmesh.new(); buv = bb.loops.layers.uv.new('UVMap'); vm = {}
+    for f in selb:
+        vs = []
+        for v in f.verts:
+            if v.index not in vm: vm[v.index] = bb.verts.new(v.co)
+            vs.append(vm[v.index])
+        nf = bb.faces.new(vs)
+        for l, lo in zip(nf.loops, f.loops): l[buv].uv = lo[uvh].uv
+    for v in bb.verts:  # (no subdivide: the head is dense enough there, keeps the shell ~3k tris)
+        loc, n, mh, _ = surf(v.co); t = float(paint.beard_thick(mh[None])[0]) * float(paint.beard_mask(mh[None], soft=2.0)[0])
+        v.co = loc + n * (t - 0.0009) + Vector((0, 0, -0.35 * t))  # a little droop: the beard hangs
+    bmesh.ops.recalc_face_normals(bb, faces=bb.faces[:])
+    tmp = bpy.data.meshes.new('beardtmp'); bb.to_mesh(tmp); print('BEARD faces', len(bb.faces)); bb.free(); out.from_mesh(tmp); bpy.data.meshes.remove(tmp)
+    ouv = out.loops.layers.uv['UVMap']
 # grid shell builder (moustache / brows)
 def grid_shell(xy, nu, nv, thick, droop=0.0, mi=0, flip=False):
     top = [[None] * (nu + 1) for _ in range(nv + 1)]; bot = [[None] * (nu + 1) for _ in range(nv + 1)]; UV = [[None] * (nu + 1) for _ in range(nv + 1)]
@@ -336,6 +370,11 @@ ta.image = bpy.data.images.load(f'{TEX}/villain_{VK}_head_albedo.png')
 me_ = bpy.data.materials.new(f'villain_{VK}_eye'); me_.use_nodes = True; t2 = me_.node_tree; b2 = t2.nodes['Principled BSDF']
 te = t2.nodes.new('ShaderNodeTexImage'); te.image = bpy.data.images.load(f'{TEX}/villain_{VK}_eye.png'); t2.links.new(te.outputs[0], b2.inputs['Base Color'])
 b2.inputs['Roughness'].default_value = 0.12
+if CFG.get('glow'):  # glowing eyes (eye-beam hero): emissive iris
+    GE = irisc * irf[..., None] * 1.6 + np.array([1.0, 0.8, 0.45]) * ss(0.75, 0.3, th)[..., None] * 0.25
+    save(np.clip(GE, 0, 1) ** (1 / 2.2), f'villain_{VK}_eye_emit')
+    tg = t2.nodes.new('ShaderNodeTexImage'); tg.image = bpy.data.images.load(f'{TEX}/villain_{VK}_eye_emit.png')
+    t2.links.new(tg.outputs[0], b2.inputs['Emission Color']); b2.inputs['Emission Strength'].default_value = 3.0
 dm.materials.append(mh_); dm.materials.append(me_)
 for n in ('mhp', 'val', 'ao'):
     if n in bpy.data.images: bpy.data.images.remove(bpy.data.images[n])

@@ -8,7 +8,8 @@ from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 VK = sys.argv[sys.argv.index('--') + 1:][0]
 RIG = '/workspace/hero-game-assets/rig'; D = '/workspace/hero-game-assets/villain_face'
-bpy.ops.wm.open_mainfile(filepath=f'{RIG}/villain_{VK}_anim_face.blend')
+SRC = 'cent_anim_face' if VK == 'c' else f'villain_{VK}_anim_face'   # 'c' = Centurion himself (hero face candidate)
+bpy.ops.wm.open_mainfile(filepath=f'{RIG}/{SRC}.blend')
 ao = bpy.data.objects['cent_rig']; ao.animation_data.action = None
 for pb in ao.pose.bones: pb.rotation_quaternion = (1, 0, 0, 0); pb.location = (0, 0, 0)
 bpy.context.view_layer.update()
@@ -30,6 +31,7 @@ def neck_centre(z):
     return Vector((0, sum(p.y for p in pts) / max(1, len(pts)), z))
 def ctop(y): return 1.585 + 0.045 * ss(-0.02, 0.03, y)       # top of the painted high collar on the body (villain.py)
 cache = {}; moved = 0
+NECK_IN = 0.007 if VK == 'c' else 0.0   # Centurion's collar ring (cape_cent) hugs the neck tighter: tuck the skin further in
 for v in hm.vertices:
     z = v.co.z; ct = ctop(v.co.y); w = ss(ct + 0.045, ct + 0.004, z)
     if w <= 0: continue
@@ -39,7 +41,8 @@ for v in hm.vertices:
     d.normalize(); loc, n, i, dist = bvh.ray_cast(c, d, 0.16)
     rb = (loc - c).length - 0.003 if loc is not None else None   # just inside the body's neck: the collar stays on top
     if rb is None or rb > 0.13: rb = min(rh, 0.075)
-    if z < ct + 0.004: r = min(rh, rb)                  # never poke out through the collar / shoulders
+    if z < ct + 0.02 and NECK_IN: r = min(rh, rb) - NECK_IN * ss(ct + 0.02, ct, z)
+    elif z < ct + 0.004: r = min(rh, rb)   # never poke out through the collar / shoulders
     else: r = rh * (1 - w) + rb * w
     v.co = Vector((c.x + d.x * r, c.y + d.y * r, z)); moved += 1
 print('NECK conformed', moved)
@@ -60,5 +63,12 @@ head.parent = ao; md = head.modifiers.new('Armature', 'ARMATURE'); md.object = a
 print('HEAD verts', len(hm.vertices), 'body verts', len(bme.vertices))
 det.name = 'CentFaceDetail'; det.data.name = 'CentFaceDetail'
 mw = det.matrix_world.copy(); det.parent = ao; det.parent_type = 'BONE'; det.parent_bone = 'head'; bpy.context.view_layer.update(); det.matrix_world = mw
-bpy.ops.wm.save_as_mainfile(filepath=f'{RIG}/villain_{VK}_anim_face_v2.blend')
+# eye-beam emitters (Centurion): move the eye_emit_L/R empties onto the front of the new eyeballs
+import json as _json
+EJ = _json.load(open(f'{D}/villain_{VK}_head.json'))['eyes']
+for sd, (c, r) in EJ.items():
+    e = bpy.data.objects.get('eye_emit_' + sd)
+    if e is None: continue
+    m = e.matrix_world.copy(); m.translation = Vector((c[0], c[1] - r * 0.9, c[2])); e.matrix_world = m; print('EYE emitter', sd, [round(a, 4) for a in m.translation])
+bpy.ops.wm.save_as_mainfile(filepath=f'{RIG}/{SRC}_v2.blend')
 print('DONE')

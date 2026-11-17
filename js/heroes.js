@@ -544,7 +544,7 @@ const _fq = new THREE.Quaternion();
 // finger bones added by tools/rig/fingers.py: index/middle/ring/pinky/thumb 1-2 per hand + palm_L/R marker empties.
 // Axes are derived per bone from the palm marker so the layer doesn't depend on Blender bone roll.
 function buildHands(B, scene, A, k) {
-  const sides = {};
+  const sides = {}; let v2 = false;
   for (const sd of ['L', 'R']) {
     const hand = B('hand.' + sd), palm = scene.getObjectByName('palm_' + sd);
     if (!hand || !palm || !B('index1.' + sd)) return null;
@@ -569,8 +569,9 @@ function buildHands(B, scene, A, k) {
     const jet = new THREE.Object3D(); jet.name = 'jet' + sd; hand.add(jet);
     const fistPos = new THREE.Vector3(0, 0.07 * k, 0), palmPos = pl.clone(); jet.position.copy(fistPos);
     sides[sd] = { hand, palm, palmN, palmPos, fistPos, fingers, wristAx, jet };
+    if (pl.length() < 0.15 * k) v2 = true; // a real palm-centre marker (tools/rig/cent_hands): realistic hands v2
   }
-  return { sides, w: { fist: 0, open: 0, knife: 0, relaxed: 1, claw: 0, spread: 0 }, q: { prox: 0, dist: 0, spread: 0, thumb: 0, wrist: 0 } };
+  return { sides, v2, w: { fist: 0, open: 0, knife: 0, relaxed: 1, claw: 0, spread: 0 }, q: { prox: 0, dist: 0, spread: 0, thumb: 0, wrist: 0 } };
 }
 
 export class Hero {
@@ -892,9 +893,9 @@ export class Hero {
     else if (this.grabbedBy) want = 'claw';               // clawing at the choking arm
     else if (strike || this.grabbing || this.holdW > 0.3) want = 'fist';
     else if (act && act.beam) want = fire ? 'claw' : 'fist';
-    else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? (this.def.flyHand || 'knife') : 'relaxed');
-    else if (this.state === 'air') want = fire ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying)
-    else want = fire ? 'fist' : 'relaxed';
+    else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? (this.def.flyHand || 'knife') : H.v2 ? 'fist' : 'relaxed'); // v2 hands: blade in flight, fist when hovering
+    else if (this.state === 'air') want = fire || (H.v2 && !this.def.villain) ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying)
+    else want = fire || (H.v2 && !this.def.villain) ? 'fist' : 'relaxed';
     const k = Math.min(1, dt * (want === 'fist' ? 18 : 9));
     for (const n in W) W[n] += ((n === want ? 1 : 0) - W[n]) * k;
     const q = H.q; for (const f in q) { let v = 0; for (const n in W) v += W[n] * P[n][f]; q[f] = v; }
@@ -902,7 +903,7 @@ export class Hero {
     for (const sd of ['L', 'R']) {
       const S = H.sides[sd];
       for (const F of S.fingers) {
-        const c = F.thumb ? q.thumb * (F.seg === 1 ? 0.6 : 1) : (F.seg === 1 ? q.prox : q.dist);
+        const c = F.thumb ? (q.thumb - (H.v2 ? 0.3 * W.knife : 0)) * (F.seg === 1 ? 0.6 : 1) : (F.seg === 1 ? q.prox : q.dist); // v2 hands: blade thumb stays flat along the index
         F.bone.quaternion.copy(F.rest).multiply(_fq.setFromAxisAngle(F.curl, c));
         if (F.seg === 1) F.bone.quaternion.multiply(_fq.setFromAxisAngle(F.palm, F.fan * q.spread));
       }
