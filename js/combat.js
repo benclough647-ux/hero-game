@@ -6,7 +6,7 @@ import { whooshSound, roarSound, fireBlastSound, punchSound, laserSound, setWorl
 // procedural ragdoll with building/ground collisions, KO + respawn, and the AI opponent.
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const GRAV = 32, CHEST = 1.15;
-const t1 = V(), t2 = V(), t3 = V(), t4 = V();
+const t1 = V(), t2 = V(), t3 = V(), t4 = V(), t5 = V();
 const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
@@ -39,7 +39,7 @@ export const COUNTER = { invuln: 0.9,
 // Range is capped (no teleport): a target beyond max gets a max-length lunge toward it. Lunges over superMin m use the
 // stretched Superman pose and the heavy impact.
 export const DASH = { speed: 230, max: 90, free: 14, stop: 1.8, maxT: 0.6, assist: 75, cone: 0.55, lead: 0.5, softTurn: 11, superMin: 7,
-  impact: { kb: 120, kbSpeed: 0.55, up: 0.32, spin: 14, dmgBonus: 10 } };
+  impact: { kb: 120, kbSpeed: 0.55, spin: 14, dmgBonus: 10 } }; // (no upward lift: the lunge sends them along the punch)
 // rival-only leg grab: when the player is close (or flies past / right after the rival dodges) it seizes a leg, giant-swings
 // them and flings them into a ragdoll tumble. The player has `window` s to counter (Y): curl up and punch the grabber off.
 // pursuit of a fleeing player (moving away from the villain): small cruise-speed bonus (not boost: boosting still escapes),
@@ -275,14 +275,16 @@ export class Combat {
     if (target.hp <= 0) this.knockOut(target);
     return amount;
   }
-  knockback(target, dir, speed, up = 0.25, ragdoll = false, spin = 6) {
+  // knockback goes exactly along `dir` (plus an optional explicit `up`, 0 by default): no forced lift, so a hit aimed down
+  // drives the target down (into the ground / dunes: ragdollStep bounces it with an impact) and a level hit skims
+  knockback(target, dir, speed, up = 0, ragdoll = false, spin = 6) {
     if (target.grabbedBy) this.releaseGrab(target.grabbedBy);
     if (target.legGrabbing) this.releaseLeg(target);
     target.action = null;
     const v = t1.copy(dir).setY(dir.y + up).normalize().multiplyScalar(speed / target.def.mass);
     target.vel.copy(v);
     if (ragdoll || target.ko) this.startRagdoll(target, spin);
-    else { target.knockT = 0.45; if (target.state === 'ground') { target.state = 'air'; target.vel.y = Math.max(target.vel.y, 7); target.pos.y += 0.1; } }
+    else { target.knockT = 0.45; if (target.state === 'ground') { if (v.y > 0.5) { target.state = 'air'; target.pos.y += 0.1; } else target.vel.y = 0; } }
   }
   startRagdoll(h, spin = 6) {
     if (h.legGrabbing && h.action?.type === 'leggrab') this.releaseLeg(h);
@@ -541,7 +543,7 @@ export class Combat {
       act.strikeT += dt;
       if (!act.struck && act.strikeT >= 0.08) { // the fist lands: huge knockback into a ragdoll
         act.struck = true; const c = act.charge;
-        const dir = (isP ? this.camFwd.clone().setY(Math.max(-0.2, this.camFwd.y)) : F.clone()).normalize(); dir.y += 0.15; dir.normalize();
+        const dir = (isP ? this.camFwd.clone() : F.clone()).normalize(); if (Math.abs(dir.y) < 0.12) { dir.y = 0; dir.normalize(); } // straight along the punch (no lift)
         const hp = this.chest(b, V());
         this.releaseGrab(a); act.t = act.dur - 0.3; // keep the follow-through pose briefly
         this.damage(b, 12 + 33 * c, a, 'chargedPunch', { charge: +c.toFixed(2) }); this.punchSfx(0.5 + 0.5 * c, a, b);
@@ -840,6 +842,15 @@ export class Combat {
     }
     return null;
   }
+  // the punch's own direction: the fist's travel (dash / lunge momentum) or the hero's aim (camera pitch / homing), blended
+  // with the line to the target's chest. Up, down or level, the victim flies that way; near-level punches stay level
+  // so a ground punch skims along the ground instead of popping up.
+  punchDir(a, to) {
+    const act = a.action, fist = (act?.dashed && a.vel.lengthSq() > 400) ? t5.copy(a.vel).normalize() : t5.copy(a.aim).normalize();
+    const dir = fist.multiplyScalar(0.6).addScaledVector(to, 0.4); if (dir.lengthSq() < 1e-6) dir.copy(to);
+    dir.normalize(); if (Math.abs(dir.y) < 0.12) { dir.y = 0; dir.normalize(); }
+    return dir.clone();
+  }
   tryPunch(a, b) {
     const ca = this.chest(a, t1), cb = this.chest(b, t2), to = t3.copy(cb).sub(ca); const d = to.length();
     const reach = 3.2 + a.def.height * 0.3;
@@ -852,8 +863,9 @@ export class Combat {
     const L = act?.lunge ? DASH.impact : null, fire = a.def.style === 'fire';
     const dmg = this.damage(b, 9 + 0.24 * sp + (L ? L.dmgBonus : 0), a, 'punch', { speed: sp, lunge: !!L });
     this.punchSfx(L ? 1 : clamp(sp / 160, 0.2, 0.9), a, b);
-    const dir = to.clone(); dir.y = Math.max(dir.y, 0);
-    if (L) this.knockback(b, dir, L.kb + L.kbSpeed * sp, L.up, true, L.spin); else this.knockback(b, dir, 48 + 0.5 * sp, 0.3, true, 10);
+    const dir = this.punchDir(a, to);
+    if (L) this.knockback(b, dir, L.kb + L.kbSpeed * sp, 0, true, L.spin); else this.knockback(b, dir, 48 + 0.5 * sp, 0, true, 10);
+    if (dir.y < -0.3) { b.ragdoll.punchedDown = true; this.stats.hits.push({ t: this.t, kind: 'punchDown', amount: 0, vy: b.vel.y, target: b.key, attacker: a.key }); }
     const hp = cb.clone().addScaledVector(to, -0.4);
     if (L) { // Superman punch impact: oriented shock ring + ground ring, big flash, debris burst, shake, FOV punch
       this.fx.shockwaveOriented?.(hp, to, fire ? 0xff8a30 : 0xfff2c8, 26, 0.5, 0.9);
@@ -1031,7 +1043,7 @@ export class Combat {
     this.beam = { from: from.clone(), dir: dir.clone(), len, t: 0, dur: 0.42, owner: a };
     if (hit) {
       this.burst(hit.p, a, 50, 14); this.fx.flash(hit.p, 0xfff0c0, 50, 0.35);
-      if (hit.type === 'enemy') { this.damage(b, 11, a, 'ray'); this.knockback(b, dir, 34, 0.2, false); this.shakeNear(hit.p, 0.2); }
+      if (hit.type === 'enemy') { this.damage(b, 11, a, 'ray'); this.knockback(b, dir, 34, 0, false); this.shakeNear(hit.p, 0.2); }
       else if (hit.type === 'wall') { const w = this.wallHit(hit.p.clone().addScaledVector(dir, 0.6), 0.1); this.fx.impact(hit.p, w ? w.normal : dir.clone().negate(), 0.35, true); }
     }
   }
@@ -1060,7 +1072,7 @@ export class Combat {
         const tt = clamp(t2.copy(c).sub(prev).dot(seg), 0, L); const closest = t2.copy(prev).addScaledVector(seg, tt);
         if (closest.distanceTo(c) < p.r) {
           this.damage(h, 10, p.owner, 'fire');
-          this.knockback(h, p.vel.clone().normalize(), 36, 0.25, false);
+          this.knockback(h, p.vel.clone().normalize(), 36, 0, false);
           this.explode(closest, 1); this.shakeNear(closest, 0.25); return false;
         }
       }
@@ -1106,7 +1118,9 @@ export class Combat {
         h.pos.y = floor; onGround = true;
         if (h.vel.y < -4) {
           const imp = -h.vel.y;
-          h.vel.y = imp * 0.32; h.vel.x *= 0.75; h.vel.z *= 0.75; rd.av.multiplyScalar(0.6); rd.bounces++;
+          // punched down into the ground: the ground soaks the hit (crater + a small bounce), it doesn't fling them back up
+          h.vel.y = rd.punchedDown ? Math.min(imp * 0.32, 5) : imp * 0.32; rd.punchedDown = false;
+          h.vel.x *= 0.75; h.vel.z *= 0.75; rd.av.multiplyScalar(0.6); rd.bounces++;
           // glancing ground hits kick the body into a roll along the slide direction
           const lv = t4.copy(h.vel).applyAxisAngle(t1.set(0, 1, 0), -h.yaw), hs = Math.hypot(lv.x, lv.z);
           if (hs > 3) rd.av.add(t1.set(lv.z, 0, -lv.x).multiplyScalar(0.35 / 0.45)).add(t4.set(Math.random() - .5, Math.random() - .5, Math.random() - .5).multiplyScalar(2));
