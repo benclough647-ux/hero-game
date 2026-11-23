@@ -169,9 +169,9 @@ export const HERO_DEFS = {
   // the two villains (computer-controlled only, never playable): Centurion's rig + moves, no beams / roar / specials,
   // 700 HP each, flying in Ben's reference pose (chest leading, body ~46 deg from vertical, arms swept back)
   villainA: { name: 'VILLAIN A', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0,
-    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#d8dce4' },
+    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#d8dce4', thumbTuck: [0.5, 0.3, 0, 0] },
   villainB: { name: 'VILLAIN B', height: 1.83, build: centurionModel, run: 16, sprint: 34, fly: 90, flyBoost: 320, flyAccel: 3.5, turn: 7, style: 'clean', tackleSpeed: 240, mass: 1.0,
-    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#e8c070' },
+    villain: true, hp: 700, flyPitch: 0.8, flyHand: 'spread', color: '#e8c070', thumbTuck: [0.5, 0.3, 0, 0] },
 };
 export const PLAYABLE = ['tiger', 'centurion'];
 export const VILLAINS = ['villainA', 'villainB'];
@@ -562,7 +562,9 @@ function buildHands(B, scene, A, k) {
         const curl = y.clone().cross(p).normalize();                    // +angle curls the finger toward the palm
         const sideL = side.clone().applyQuaternion(inv), sgn = Math.sign(p.clone().cross(y).dot(sideL)) || 1;
         const fan = nm === 'thumb' ? 0 : sgn * (1.5 - j) / 1.5;         // index toward the thumb, pinky away
-        fingers.push({ bone: b, rest, seg, curl, palm: p, fan, thumb: nm === 'thumb' });
+        const ws = Math.sign(p.clone().cross(y).dot(sideL)) || 1;
+        const wrap = p.clone().multiplyScalar(-ws);                     // +angle swings the thumb across the fingers (toward the pinky)
+        fingers.push({ bone: b, rest, seg, curl, palm: p, fan, wrap, thumb: nm === 'thumb' });
       }
     });
     const wristAx = new THREE.Vector3(0, 1, 0).cross(palmN).normalize();  // +flex toward the palm, - bends the hand back
@@ -894,18 +896,22 @@ export class Hero {
     else if (strike || this.grabbing || this.holdW > 0.3) want = 'fist';
     else if (act && act.beam) want = fire ? 'claw' : 'fist';
     else if (this.state === 'fly') want = fire ? 'open' : (fast > 0.35 ? (this.def.flyHand || 'knife') : H.v2 ? 'fist' : 'relaxed'); // v2 hands: blade in flight, fist when hovering
-    else if (this.state === 'air') want = fire || (H.v2 && !this.def.villain) ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying)
-    else want = fire || (H.v2 && !this.def.villain) ? 'fist' : 'relaxed';
+    else if (this.state === 'air') want = fire || H.v2 ? 'fist' : 'relaxed'; // jumping / falling: Tiger keeps his fists (open palms only while flying); v2 hands (Centurion, villains) clench
+    else want = fire || H.v2 ? 'fist' : 'relaxed';
     const k = Math.min(1, dt * (want === 'fist' ? 18 : 9));
     for (const n in W) W[n] += ((n === want ? 1 : 0) - W[n]) * k;
     const q = H.q; for (const f in q) { let v = 0; for (const n in W) v += W[n] * P[n][f]; q[f] = v; }
     this.handOpen = W.open; this.handFist = W.fist; this.handKnife = W.knife; this.handPose = want;
+    const TT = H.v2 && this.def.thumbTuck; // villains with the v2 fist GLBs only (Centurion's approved tuck and Tiger don't set it)
     for (const sd of ['L', 'R']) {
       const S = H.sides[sd];
       for (const F of S.fingers) {
         const c = F.thumb ? (q.thumb - (H.v2 ? 0.3 * W.knife : 0)) * (F.seg === 1 ? 0.6 : 1) : (F.seg === 1 ? q.prox : q.dist); // v2 hands: blade thumb stays flat along the index
         F.bone.quaternion.copy(F.rest).multiply(_fq.setFromAxisAngle(F.curl, c));
         if (F.seg === 1) F.bone.quaternion.multiply(_fq.setFromAxisAngle(F.palm, F.fan * q.spread));
+        if (F.thumb && TT && W.fist > 0.001) { // thumbTuck [wrap1, wrap2, curl1, curl2] (rad at a full fist): thumb folds across the curled fingers
+          F.bone.quaternion.multiply(_fq.setFromAxisAngle(F.curl, TT[F.seg + 1] * W.fist)).multiply(_fq.setFromAxisAngle(F.wrap, TT[F.seg - 1] * W.fist));
+        }
       }
       if (q.wrist) S.hand.quaternion.multiply(_fq.setFromAxisAngle(S.wristAx, q.wrist));
       S.jet.position.lerpVectors(S.fistPos, S.palmPos, W.open); // thruster: palm centre when open, past the knuckles when fisted
