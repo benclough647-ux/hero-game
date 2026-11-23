@@ -118,6 +118,8 @@ export class City {
     const kerbMat = worldDetail(new THREE.MeshStandardMaterial({ color: 0xa6a39c, roughness: 0.75 }), { grain: 0.12, grainScale: 8, tone: 0.12, toneScale: 0.2 });
     const gt = grassTexture(); const parkMat = worldDetail(new THREE.MeshStandardMaterial({ map: gt, roughness: 0.95 }), { grain: 0.1, grainScale: 2, tone: 0.25, toneScale: 0.06 });
     this.mats = { bMat, propMat, furnMat, streetMat, paveMat, kerbMat, parkMat };
+    // ground textures and how to redraw them (repairTextures: a GPU reset can wipe a GPU-backed canvas)
+    this.texRedraw = [[streetMat, () => roadTexture(BLOCK, ROAD, SW)], [paveMat, () => pavingTexture()], [parkMat, () => grassTexture()]];
     // tame the sky IBL on matte city surfaces (it washed everything out light blue); glass keeps more for reflections
     for (const mm of [propMat, streetMat, paveMat, kerbMat, parkMat]) mm.envMapIntensity = 0.5; bMat.envMapIntensity = 0.8; furnMat.envMapIntensity = 0.6;
     // city ground (two sides of the old river channel); everything else is sand
@@ -314,6 +316,12 @@ export class City {
     const m = new THREE.Mesh(g, mat); m.name = 'sandDunes'; scene.add(m); this.sandMesh = m;
   }
   // sand surface height (0 inside the city / on the old river bed); same triangles as the mesh
+  // after a WebGL context restore: any ground canvas that came back blank (all transparent) is redrawn before re-upload
+  repairTextures() { let n = 0;
+    for (const [m, make] of this.texRedraw) { const c = m.map?.image; if (!c?.getContext) continue;
+      const px = c.getContext('2d', { willReadFrequently: true }).getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
+      if (px[3] === 0) { const fresh = make(); m.map.image = fresh.image; m.map.needsUpdate = true; fresh.dispose(); n++; } }
+    return n; }
   groundAt(x, z) {
     const S = this.sand; if (!S || (inCity(x, z) && !isRiver(x))) return 0;
     const { xs, zs, H, nz } = S, find = (a, v) => { let lo = 0, hi = a.length - 2; if (v <= a[0]) return 0; if (v >= a[hi + 1]) return hi; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (a[m] <= v) lo = m; else hi = m - 1; } return lo; };

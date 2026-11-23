@@ -140,6 +140,7 @@ renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault
 renderer.domElement.addEventListener('webglcontextrestored', () => {
   // (three.js has already re-created its GL state; image textures re-upload from their sources on first use)
   contextLost = false; world.buildEnv(renderer); // the sky IBL lives only on the GPU: without it every surface renders dark
+  const fixed = city.repairTextures(); if (fixed) console.warn('redrew ' + fixed + ' wiped ground texture(s)'); // (grass went black on Xbox)
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) rt.dispose();
   if (contextLosses >= 2 && quality.level > 0) { quality.auto = false; quality.level = 0; } // keeps losing it: drop to Low
   if (!quality.safe && contextLosses >= 1) { quality.safe = true; gpuProfile.safe = true; gpuProfile.texCap = 1024; } // first loss: switch to the safe profile
