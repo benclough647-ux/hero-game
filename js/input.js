@@ -38,14 +38,15 @@ export class Input {
       super: k('KeyB') || b(10), // LS click: sonic boom / super speed while flying
       lock: k('KeyT') || b(11) || this.mouseBtn.has(1), // RS click / T / middle mouse: lock on
       cancel: k('KeyE') || b(1),
-      switch: k('Tab') || k('KeyQ') || b(3),
+      swap: k('Tab') || k('KeyQ') || b(14) || b(15), // D-pad left / right: switch hero
+      y: k('KeyZ') || b(3), // Y: slow motion toggle (while grabbed: counter)
       any: b(0) || b(9),
       hud: k('KeyH') || b(8),
       quality: k('KeyG'),
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'switch', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'swap', 'y', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }

@@ -31,7 +31,7 @@ export class HUD {
     this.gEl.style.display = 'block';
     this.gBar.style.width = (100 * st.left / st.max).toFixed(1) + '%'; this.gBar.style.background = st.left < 1.5 ? '#ff5a3a' : (fire ? '#ff9a40' : '#ffe6a0');
     const ch = st.mode === 'punch'; this.gCh.style.display = ch ? 'block' : 'none'; if (ch) { this.gCh.firstElementChild.style.width = (100 * st.charge).toFixed(0) + '%'; this.gCh.firstElementChild.style.background = fire ? '#ff6a20' : '#fff4c8'; }
-    if (st.role === 'victim') { this.gTitle.textContent = 'GRABBED!'; this.gHint.innerHTML = pad ? '<b class="yb">Y</b> counter' : '<b>Q</b> / <b>Tab</b> counter'; return; }
+    if (st.role === 'victim') { this.gTitle.textContent = 'GRABBED!'; this.gHint.innerHTML = pad ? '<b class="yb">Y</b> counter' : '<b>Z</b> counter'; return; }
     this.gTitle.textContent = { hold: `CHOKE HOLD  ${st.left.toFixed(1)}s`, punch: 'CHARGING…', spin: 'SPINNING…', slam: 'FACE SLAM!' }[st.mode] || '';
     this.gHint.innerHTML = st.mode !== 'hold' ? (st.mode === 'punch' ? 'release to punch' : '') : pad ? '<b>A</b> face slam · <b>X</b> charged punch · <b>B</b> spin throw · <b>LS</b> ↑ forward drive' : '<b>Space</b> face slam · <b>X</b> charged punch · <b>E</b> spin throw · <b>W</b> forward drive';
   }
@@ -54,6 +54,15 @@ export class HUD {
     this.counterVisible = vis;
   }
   toggle() { this.visible = !this.visible; this.root.style.display = this.hint.style.display = this.visible ? 'block' : 'none'; }
+  // slow-motion screen cue (CSS overlay, so it works with post-processing off too): cool blue vignette (no backdrop-filter: too costly on Xbox),
+  // strength k = 0..1 follows the time ramp
+  slowmo(k) {
+    if (!this.smEl) { const d = document.createElement('div'); d.id = 'slowmo';
+      d.style.cssText = 'position:fixed;inset:0;pointer-events:none;opacity:0;display:none;background:radial-gradient(ellipse at center,rgba(40,70,110,.06) 45%,rgba(15,30,60,.55) 100%)';
+      const cv = document.querySelector('canvas'); document.body.insertBefore(d, cv ? cv.nextSibling : document.body.firstChild); this.smEl = d; this.smK = -1; } // (inserted right above the 3D view, under the HUD)
+    k = Math.round(THREE_clamp(k, 0, 1) * 100) / 100; if (k === this.smK) return; this.smK = k;
+    this.smEl.style.display = k > 0 ? 'block' : 'none'; this.smEl.style.opacity = k.toFixed(2);
+  }
   say(msg) { this.toast.textContent = msg; this.toast.style.opacity = 1; this.toastT = 2; }
   update(h, pad, dt, extra = '') {
     if ((this.toastT -= dt) < 0 && this.toast.style.opacity !== '0') this.toast.style.opacity = 0;
@@ -64,7 +73,7 @@ export class HUD {
     this.charge.style.display = h.charge > 0 ? 'block' : 'none'; this.bar.style.width = (h.charge * 100) + '%';
     if (pad !== this.lastPad) { this.lastPad = pad;
       this.hint.innerHTML = pad
-        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> (hold) roar blast / eye beams · <b>LT</b> tackle · <b>X</b> dash punch · <b>RB</b> boost/sprint · <b>LS</b> (click) sonic boom → super speed while flying · <b>RS</b> (click) lock on, flick <b>RS</b> ←/→ to switch villain · <b>A A</b> (double-tap while tumbling) recover · <b>LT</b> hit → choke grab · <b>LB</b> descend · <b>B</b> stop flying · <b>Y</b> switch hero (while grabbed: counter) · <b>View</b> HUD'
-        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> (hold) roar blast / eye beams · <b>Right click/R</b> tackle · <b>X/V</b> dash punch · <b>Shift</b> boost · <b>B</b> sonic boom (while flying) · <b>T/middle click</b> lock on, <b>[ / ]</b> switch villain · <b>Space Space</b> (tumbling) recover · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero (while grabbed: counter) · <b>H</b> HUD · <b>G</b> graphics'; }
+        ? 'L-stick move · R-stick camera · <b>A</b> jump/fly (Tiger: hold &amp; release = mega leap · Centurion: hold = take off) · <b>RT</b> (hold) roar blast / eye beams · <b>LT</b> tackle · <b>X</b> dash punch · <b>RB</b> boost/sprint · <b>LS</b> (click) sonic boom → super speed while flying · <b>RS</b> (click) lock on, flick <b>RS</b> ←/→ to switch villain · <b>A A</b> (double-tap while tumbling) recover · <b>LT</b> hit → choke grab · <b>LB</b> descend · <b>B</b> stop flying · <b>D-pad ←/→</b> switch hero · <b>Y</b> slow motion (while grabbed: counter) · <b>View</b> HUD'
+        : 'WASD move · Mouse camera · <b>Space</b> jump/fly · <b>Left click/F</b> (hold) roar blast / eye beams · <b>Right click/R</b> tackle · <b>X/V</b> dash punch · <b>Shift</b> boost · <b>B</b> sonic boom (while flying) · <b>T/middle click</b> lock on, <b>[ / ]</b> switch villain · <b>Space Space</b> (tumbling) recover · <b>C</b> descend · <b>E</b> stop flying · <b>Tab/Q</b> switch hero · <b>Z</b> slow motion (while grabbed: counter) · <b>H</b> HUD · <b>G</b> graphics'; }
   }
 }

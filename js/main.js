@@ -8,7 +8,7 @@ import { City, BLOCK, HALF, WATER_Y } from './city.js';
 import { World } from './world.js';
 import { Traffic } from './traffic.js';
 import { Hero, preloadHeroModels } from './heroes.js';
-import { unlockAudio } from './audio.js';
+import { unlockAudio, setWorldRate, setWorldSfx, slowmoSound } from './audio.js';
 for (const ev of ['pointerdown', 'keydown', 'touchstart']) addEventListener(ev, unlockAudio, { passive: true });
 import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
@@ -166,7 +166,7 @@ preloadHeroModels((p, url) => {
   markReady(true);
 });
 
-// Y swaps heroes: you become the other hero in the same spot (same state / health); the villains stay the enemies
+// D-pad left / right swaps heroes: you become the other hero in the same spot (same state / health); the villains stay the enemies
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
   if (a.grabbing) combat.releaseGrab(a); if (a.legGrabbing) combat.releaseLeg(a);
@@ -179,19 +179,38 @@ function switchHero() {
 }
 const lockPt = new THREE.Vector3();
 const free = h => !h.ragdoll && !h.grabbedBy && !h.slammedBy && !h.legGrabbedBy;
+// Y: extreme slow motion for the world (villains, their attacks, projectiles, particles, debris, traffic, water); the hero
+// you play and the camera keep real time. Eased in/out over ~0.3 s. While a villain holds you, Y is the counter instead.
+const SLOWMO = { rate: 0.1, ease: 9 };
+const slow = { on: false, rate: 1, toggles: 0, heldT: 0 };
+function setSlowmo(on) { if (slow.on === on) return; slow.on = on; slow.toggles++; slowmoSound(on); hud.say(on ? 'Slow motion' : 'Normal speed'); }
+function canToggleSlowmo(P, dt) { // not while held / thrown, nor for 0.6 s after a hold ends (a late counter press shouldn't flip time)
+  if (P.grabbedBy || P.legGrabbedBy || P.slammedBy || P.ragdoll || P.action?.type === 'counter') { slow.heldT = 0.6; return false; }
+  return (slow.heldT = Math.max(0, slow.heldT - dt)) <= 0;
+}
+function stepSlowmo(dt) { // ease the world clock in log space so 1 -> 0.1 feels even
+  const target = slow.on ? SLOWMO.rate : 1, k = 1 - Math.exp(-dt * SLOWMO.ease);
+  slow.rate = Math.exp(Math.log(slow.rate) + (Math.log(target) - Math.log(slow.rate)) * k);
+  if (Math.abs(slow.rate - target) < 0.002) slow.rate = target;
+  setWorldRate(slow.rate); hud.slowmo((1 - slow.rate) / (1 - SLOWMO.rate));
+}
 function combatFrame(dt, inp) {
   const P = heroes[idx];
+  if (canToggleSlowmo(P, dt) && inp?.yPressed) setSlowmo(!slow.on); // (grabbed: combat.update turns Y into the counter)
+  stepSlowmo(dt); const wdt = dt * slow.rate; // world time
   if (free(P)) P.update(dt, P.ko ? NOINP : inp, cam, city);
-  for (const v of villains) { const ai = v.parked ? NOINP : combat.aiInput(dt, v, P); if (free(v)) v.update(dt, ai, v.aiCam, city); }
+  setWorldSfx(true);
+  for (const v of villains) { const ai = v.parked ? NOINP : combat.aiInput(wdt, v, P); if (free(v)) v.update(wdt, ai, v.aiCam, city); }
+  setWorldSfx(false);
   const live = villains.some(v => v.parked) ? villains.filter(v => !v.parked) : villains; // tests can park villain B out of the fight
-  combat.update(dt, P, live, P.ko ? null : inp, cam.forward);
+  combat.update(dt, P, live, P.ko ? null : inp, cam.forward, wdt);
   combat.updateLock(dt, P, live, inp);
   const L = combat.lockTarget(); cam.lockTarget = L ? combat.chest(L, lockPt) : null;
-  for (const h of [P, ...villains]) if (!free(h)) h.animate(dt, 0);
+  for (const h of [P, ...villains]) if (!free(h)) h.animate(h === P ? dt : wdt, 0);
   for (const v of villains) if (v.legGrabbing) combat.attachLeg(v); // leg grab: ankle pinned to the palm after both poses are evaluated
   // KO -> respawn (villains come back at full 700 HP a short way off)
   if (P.ko && (P.koT += dt) > 3.2) { combat.reset(P, P.pos.clone().setY(city.heightAt(P.pos.x, P.pos.z))); hud.say('Back on your feet'); }
-  for (const v of villains) if (v.ko && (v.koT += dt) > 4) combat.respawnNear(v, P);
+  for (const v of villains) if (v.ko && (v.koT += wdt) > 4) combat.respawnNear(v, P);
   hud.bars(P, villains, combat.inCombat(P, villains), dt, combat.lockTarget());
   hud.grab(combat.grabState(P, villains), input.state.hasPad, P.def.style === 'fire');
   const G = villains.find(v => v.grabbing === P || v.legGrabbing === P);
@@ -203,7 +222,10 @@ function render() { if (contextLost) return; if (usePost) composer.render(); els
 function frame() {
   requestAnimationFrame(frame);
   if (paused) return;
-  const raw = clock.getDelta(), dt = Math.min(raw, 1 / 20);
+  tick(clock.getDelta());
+}
+function tick(raw) { // one full game frame (tests drive it directly with a fixed raw dt)
+  const dt = Math.min(raw, 1 / 20);
   const inp = input.update(dt);
   if (inp.anyPressed || inp.superPressed) unlockAudio(); // controller presses (may not count as a gesture everywhere)
   if (inp.hudPressed) hud.toggle();
@@ -211,7 +233,7 @@ function frame() {
   const h = heroes[idx];
   if (!started) { if (assetsReady && inp.anyPressed) begin(); cam.update(dt, { lookX: dt * 0.1, lookY: 0 }, h, city); h.animate(dt, 0); for (const v of villains) v.animate(dt, 0); }
   else {
-    if (inp.switchPressed && !heroes[idx].grabbedBy && !heroes[idx].legGrabbedBy && heroes[idx].action?.type !== 'counter') switchHero(); // Y while grabbed = counter instead
+    if (inp.swapPressed && !heroes[idx].grabbedBy && !heroes[idx].legGrabbedBy && !heroes[idx].slammedBy && heroes[idx].action?.type !== 'counter') switchHero(); // D-pad left / right
     combatFrame(dt, inp); cam.update(dt, inp, heroes[idx], city);
   }
   step(dt, raw);
@@ -219,9 +241,10 @@ function frame() {
 function step(dt, raw, noRender) {
   const h = heroes[idx]; Hero.audioHero = h; // only the hero you control plays its looping flight sounds
   if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
+  const wdt = dt * slow.rate; // world time (slow motion); the player's own speed lines / spray stay real time
   fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120) || (h.superSprint && h.state === 'ground' && Math.hypot(h.vel.x, h.vel.z) > 30), h.def.style === 'fire');
-  fx.update(dt); traffic.update(dt);
-  world.update(dt, camera, h.pos);
+  fx.update(wdt); traffic.update(wdt);
+  world.update(wdt, camera, h.pos);
   city.update(camera.position, view);
   const msg = quality.sample(raw); if (msg) hud.say(msg);
   hud.update(h, input.state.hasPad, dt, ` · ${quality.preset.name}`);
@@ -232,4 +255,4 @@ frame();
 window.__game = { heroes, villains, everyone, city, cam, combat, combatFrame, get enemy() { return villains[0]; }, get focus() { return combat.focus(heroes[idx], cam.forward); },
   solo(on = true) { const B = villains[1]; if (on) { combat.reset(B, heroes[idx].pos.clone().add(new THREE.Vector3(2500, 0, 2500)).setY(0)); B.parked = true; } else { B.parked = false; combat.respawnNear(B, heroes[idx]); } }, // tests: park villain B far away
   get other() { return heroes[idx ^ 1]; }, hud, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
-  setPaused(v) { paused = v; }, scene, THREE, gpuProfile, get contextLosses() { return contextLosses; }, prewarm, get ready() { return assetsReady; }, markReady };
+  setPaused(v) { paused = v; }, scene, THREE, gpuProfile, slow, setSlowmo, SLOWMO, traffic, fx, tick, get contextLosses() { return contextLosses; }, prewarm, get ready() { return assetsReady; }, markReady };

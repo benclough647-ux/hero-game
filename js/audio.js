@@ -4,14 +4,42 @@ export function unlockAudio() {
   try {
     if (!ctx) {
       const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
-      ctx = new AC(); const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -10; comp.ratio.value = 6;
-      master = ctx.createGain(); master.gain.value = 0.8; master.connect(comp); comp.connect(ctx.destination);
+      ctx = new AC(); pitchWorld(ctx); const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -10; comp.ratio.value = 6;
+      master = ctx.createGain(); master.gain.value = 0.8; muffle = ctx.createBiquadFilter(); muffle.type = 'lowpass'; muffle.frequency.value = 20000; muffle.Q.value = 0.5; master.connect(muffle); muffle.connect(comp); comp.connect(ctx.destination);
       noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate); const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     }
     if (ctx.state === 'suspended') ctx.resume();
     loadRoar(); loadSfx();
   } catch (e) { /* audio is optional */ }
+}
+// Slow motion: sounds started by the world (villains, their hits, projectiles, ragdoll crashes) drop in pitch with
+// world time; the player's own sounds stay normal. setWorldSfx(true) marks the code that follows as world-owned.
+// Pitch follows rate^0.45 (0.1x time -> ~0.35x pitch, about 1.5 octaves down) so hits stay audible; one-shot
+// sources are pitched when they start (already-playing sounds keep their pitch).
+let worldRate = 1, worldSfx = false, muffle = null;
+export function setWorldRate(r) { // also a gentle low-pass on the whole mix while time is slowed (subtle slow-mo cue)
+  if (Math.abs(r - worldRate) < 1e-4) return; worldRate = r;
+  if (muffle && ctx) { const k = Math.min(1, Math.max(0, (1 - r) / 0.9)); muffle.frequency.setTargetAtTime(20000 * Math.pow(3200 / 20000, k), ctx.currentTime, 0.05); }
+}
+export const getWorldRate = () => worldRate;
+// slow-motion toggle cue: a deep "whoomp" down-sweep going in, a rising sweep coming out
+export function slowmoSound(on) {
+  unlockAudio(); if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime + 0.01, o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine';
+  o.frequency.setValueAtTime(on ? 220 : 60, t); o.frequency.exponentialRampToValueAtTime(on ? 45 : 240, t + 0.45);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.45, t + 0.03); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.6);
+  noise(t, 0.5, 'bandpass', on ? 2400 : 300, on ? 250 : 2600, 0.22, 0.04);
+  slowmoSound.last = { t: ctx.currentTime, on };
+}
+export function setWorldSfx(on) { worldSfx = on; }
+export const sfxPitch = () => worldSfx && worldRate < 0.999 ? Math.pow(worldRate, 0.45) : 1;
+if (typeof window !== 'undefined') window.__sfxPitch = { get rate() { return worldRate; }, get world() { return worldSfx; }, pitch: sfxPitch, log: [] };
+function pitchWorld(c) {
+  const cents = () => 1200 * Math.log2(sfxPitch());
+  for (const fn of ['createBufferSource', 'createOscillator']) { const orig = c[fn].bind(c);
+    c[fn] = () => { const n = orig(), d = cents(); if (d < -1) { n.detune.value = d; const L = window.__sfxPitch.log; L.push(+d.toFixed(0)); if (L.length > 40) L.shift(); } return n; }; }
 }
 // Temper Tiger's roar: a real tiger roar sample supplied by Ben (see assets/CREDITS.md); Ogg Vorbis, AAC fallback
 const roarState = { buf: null, loading: false, error: null, url: null };

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { whooshSound, roarSound, fireBlastSound, punchSound, laserSound } from './audio.js';
+import { whooshSound, roarSound, fireBlastSound, punchSound, laserSound, setWorldSfx } from './audio.js';
 // Combat: the player (Tiger or Centurion) vs two computer-controlled villains at once (coordinated: one grab at a time,
 // staggered attacks), player-only beams (Tiger roar blast / Centurion eye beam),
 // tackle-grab that can smash the target into buildings, super punch with ragdoll, momentum-based damage,
@@ -106,7 +106,7 @@ void main() {
 export class Combat {
   constructor(scene, fx, city, cam, hud) {
     this.scene = scene; this.fx = fx; this.city = city; this.cam = cam; this.hud = hud;
-    this.projectiles = []; this.t = 0; this.lastCombat = -99; this.enemies = [];
+    this.projectiles = []; this.t = 0; this.wt = 0; this.lastCombat = -99; this.enemies = [];
     this.coord = { lastAtk: -9, lead: 0, leadT: 5, starts: [] }; // villain coordination (see VILLAIN_AI)
     this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null;
     this.stats = { hits: [] }; // for automated tests
@@ -334,8 +334,9 @@ export class Combat {
   }
 
   // ---------- per-frame ----------
-  update(dt, player, enemies, inp, camFwd) {
-    this.t += dt;
+  // dt: the player's (real) frame time; wdt: world time (slow motion scales everything except the player)
+  update(dt, player, enemies, inp, camFwd, wdt = dt) {
+    this.t += dt; this.wt = (this.wt || 0) + wdt;
     if (!Array.isArray(enemies)) enemies = [enemies];
     this.enemies = enemies; player.isPlayer = true; for (const e of enemies) { e.isPlayer = false; this.brainOf(e); }
     this.player = player; this.pInp = inp; this.camFwd = camFwd;
@@ -346,14 +347,14 @@ export class Combat {
       if (rd.getUp <= 0 && player.cd.recover <= 0 && this.t - (rd.lastTap ?? -9) < 0.3) this.recover(player);
       else rd.lastTap = this.t;
     }
-    for (const h of all) {
-      for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - dt);
-      if (h.invulnT > 0) h.invulnT = Math.max(0, h.invulnT - dt);
+    for (const h of all) { const hdt = h === player ? dt : wdt;
+      for (const k in h.cd) h.cd[k] = Math.max(0, h.cd[k] - hdt);
+      if (h.invulnT > 0) h.invulnT = Math.max(0, h.invulnT - hdt);
       // the punch wind-up holds while the dash is still closing the gap, so the fist lands on arrival
-      if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += dt; }
+      if (h.action) { if (!(h.action.dash && h.action.t >= 0.08)) h.action.t += hdt; }
     }
     // grab counter: Y while a villain holds you (player only: the AI never counters)
-    if (inp && inp.switchPressed && this.canCounter(player)) { if (player.legGrabbedBy) this.legCounter(player, player.legGrabbedBy); else this.counter(player, player.grabbedBy); }
+    if (inp && inp.yPressed && this.canCounter(player)) { if (player.legGrabbedBy) this.legCounter(player, player.legGrabbedBy); else this.counter(player, player.grabbedBy); }
     // player commands, aimed at the focus villain (locked on: always aim at / track it)
     const enemy = this.focus(player, camFwd);
     if (inp && !player.ko && enemy) {
@@ -375,16 +376,19 @@ export class Combat {
       }
     }
     // the player's move resolves against its target, or (untargeted) the nearest villain; each villain only fights the player
-    if (player.action) this.actionStep(dt, player, this.foeFor(player));
-    for (const e of enemies) this.actionStep(dt, e, player);
-    this.updateProjectiles(dt, all);
-    this.updateBeam(dt); this.updateEyeBeam(dt);
-    for (const h of all) {
-      if (h.ragdoll) this.ragdollStep(dt, h);
+    setWorldSfx(false); if (player.action) this.actionStep(dt, player, this.foeFor(player));
+    setWorldSfx(true); for (const e of enemies) this.actionStep(wdt, e, player);
+    this.updateProjectiles(wdt, all);
+    setWorldSfx(false);
+    const odt = o => o && o !== player ? wdt : dt; // beams run on their owner's clock
+    this.updateBeam(odt(this.beam?.owner)); this.updateEyeBeam(odt(this.eyeBeam?.owner));
+    for (const h of all) { const hdt = h === player ? dt : wdt; setWorldSfx(h !== player);
+      if (h.ragdoll) this.ragdollStep(hdt, h);
       if (h.grabbedBy) this.carryStep(h.grabbedBy, h);
-      if (h.legGrabbedBy) this.legSwingStep(dt, h.legGrabbedBy, h);
+      if (h.legGrabbedBy) this.legSwingStep(wdt, h.legGrabbedBy, h); // the villain's swing (world time)
       if (h.slammedBy) this.slamCarry(h.slammedBy, h);
     }
+    setWorldSfx(false);
   }
   foeFor(P) {
     const act = P.action;
@@ -1153,12 +1157,12 @@ export class Combat {
     if (P && (P.grabbedBy || P.legGrabbedBy || P.slammedBy)) return true;
     return this.enemies.some(e => e !== ai && (e.grabbing || e.legGrabbing || e.action?.type === 'tackle' || e.action?.type === 'leggrab'));
   }
-  canStartAttack(ai) { return this.t - this.coord.lastAtk >= VILLAIN_AI.gap; }
+  canStartAttack(ai) { return this.wt - this.coord.lastAtk >= VILLAIN_AI.gap; }
   aiStart(ai, type, dir) {
     if (!this.canStartAttack(ai)) return false;
     if (type === 'tackle' && this.grabBusy(ai)) return false;
     const ok = this.start(ai, type, dir);
-    if (ok) { this.coord.lastAtk = this.t; this.coord.starts.push({ t: +this.t.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
+    if (ok) { this.coord.lastAtk = this.wt; this.coord.starts.push({ t: +this.t.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
     return ok;
   }
   // the target is flying / running away from `a` (its velocity points away from a): used for the pursuit tweaks (PURSUIT)
@@ -1231,7 +1235,7 @@ export class Combat {
       const behind = flee && d < PURSUIT.behindR; // catching up from behind: longer reach, better odds
       if (close || passing || afterDodge || behind) {
         const ch = afterDodge ? LEG.dodgeChance : passing ? LEG.passChance : behind ? PURSUIT.behindChance : LEG.chance;
-        if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); C.lastAtk = this.t; C.starts.push({ t: +this.t.toFixed(3), key: ai.key, type: 'leggrab' }); return inp; }
+        if (this.forceLegGrab || Math.random() < ch) { this.legGrab(ai, player); C.lastAtk = this.wt; C.starts.push({ t: +this.t.toFixed(3), key: ai.key, type: 'leggrab' }); return inp; }
         B.legCd = 1.2; // missed the roll: try again a bit later
       }
     }
