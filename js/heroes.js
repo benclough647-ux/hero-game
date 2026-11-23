@@ -1287,6 +1287,11 @@ export class Hero {
         r.body.quaternion.copy(_q1).multiply(_q2.setFromAxisAngle(_ax.set(1, 0, 0), -Math.PI * 2 * e));
         if (u >= 1) { this.flip = null; r.body.rotation.set(0, 0, 0); }
       }
+      if (this.ragBlend) { // grabbed out of a ragdoll tumble (combat.grab): ease from the tumble pose into the held pose
+        const b = this.ragBlend; b.t += dt; const u = Math.min(1, b.t / b.dur), e = u * u * (3 - 2 * u);
+        r.body.quaternion.copy(_q1.copy(b.q).slerp(r.body.quaternion, e)); r.body.position.y = b.y + (this.hipH - b.y) * e;
+        if (u >= 1 || this.ragdoll) this.ragBlend = null;
+      }
       if (this.useSkin) this.animateSkin(dt, hs, fb); else this.animateArms(dt, run, fb, r.body.rotation.x);
       if (fire) this.fireFx(dt, fly); else this.windAudio(fly);
       this.animateMohawk();

@@ -286,7 +286,7 @@ export class Combat {
     if (ragdoll || target.ko) this.startRagdoll(target, spin);
     else { target.knockT = 0.45; if (target.state === 'ground') { if (v.y > 0.5) { target.state = 'air'; target.pos.y += 0.1; } else target.vel.y = 0; } }
   }
-  startRagdoll(h, spin = 6) {
+  startRagdoll(h, spin = 6) { h.ragBlend = null;
     if (h.legGrabbing && h.action?.type === 'leggrab') this.releaseLeg(h);
     h.action = null; h.knockT = 0; h.charge = 0; h.endSprint?.(); h.landT = 0;
     if (h.grabbing) this.releaseGrab(h);
@@ -430,7 +430,7 @@ export class Combat {
         if (!act.soft || to.dot(a.aim) > TACKLE.assistMinDot) { a.aim.lerp(to, 1 - Math.exp(-dt * (act.soft ? TACKLE.assistTurn : TACKLE.lockTurn))).normalize(); act.homing = true; }
       }
       for (const v of (a === this.player ? [b, ...this.enemies.filter(e => e !== b)] : [b])) {
-        if (a.grabbing || v.ko || v.ragdoll || v.grabbedBy) continue;
+        if (a.grabbing || v.ko || v.grabbedBy || (v.ragdoll && a !== this.player)) continue; // the player can snatch a villain out of a ragdoll tumble
         // swept test (at 250+ m/s the attacker moves several metres per frame)
         const cb = this.chest(v, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(v.vel).multiplyScalar(dt), L = rel.length();
         const c0 = t4.copy(c1).sub(rel); let d;
@@ -466,6 +466,10 @@ export class Combat {
     this.damage(b, 4 + 0.1 * rel, a, 'tackle', { speed: rel });
     // the tackle ends in a one-handed choke hold: the attacker brakes hard and hangs the victim at arm's length
     if (b.ko) { this.releaseGrab(a); return; }
+    // caught mid-tumble (ragdolling from a hit): blend the body out of its tumble into the held pose instead of snapping
+    // (hero.animate eases rig.body from this pose; the joint layer fades out on its own); the grip lands on the neck as usual
+    if (b.ragdoll) { b.ragBlend = { q: b.rig.body.quaternion.clone(), y: b.rig.body.position.y, t: 0, dur: 0.25 }; b.flip = null; b.landT = 0;
+      this.stats.hits.push({ t: this.t, kind: 'ragdollGrab', amount: 0, target: b.key, attacker: a.key }); }
     act.mode = 'hold'; act.holdT = 0; b.endSuper?.(); a.endSuper?.(); b.ragdoll = null;
     a.vel.multiplyScalar(0.25);
     if (a !== this.player) { const B = this.brainOf(a); B.chokeT = 1 + Math.random() * 2; B.chokeOpt = ['punch', 'spin', 'drive'][Math.floor(Math.random() * 3)]; B.chokeCharge = 0.45 + Math.random() * 0.55; }
