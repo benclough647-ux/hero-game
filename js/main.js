@@ -42,7 +42,7 @@ function capTexture(t, cap) { // downscale an image texture to <= cap px (keeps 
   if (!w || !h || (w <= cap && h <= cap)) return;
   try {
     const s = cap / Math.max(w, h), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
-    c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); t.dispose(); t.image = c; t.needsUpdate = true; im.close?.();
+    c.getContext('2d', { willReadFrequently: true }).drawImage(im, 0, 0, c.width, c.height); t.dispose(); t.image = c; t.needsUpdate = true; im.close?.();
   } catch (e) { console.warn('texture cap failed', e); }
 }
 const TEX_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap', 'bumpMap', 'lightMap'];

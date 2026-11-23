@@ -3,6 +3,9 @@ import * as THREE from 'three';
 // asphalt with lane markings, zebra crossings, stop lines, manholes, drains and patches; paving slabs; grass.
 export function rngTex(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
+// Texture canvases are created with willReadFrequently so the browser keeps them in CPU memory. A GPU-accelerated 2D
+// canvas is wiped when the GPU resets (Xbox Edge does this, e.g. on a hero swap): the WebGL context-restore path then
+// re-uploaded a blank canvas and the park grass (the one ground texture never read back by speckle()) went black.
 function finish(c, srgb = true, aniso = 8) {
   const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = aniso; t.flipY = false;
   if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; return t;
@@ -16,7 +19,7 @@ function speckle(g, x0, y0, w, h, amp, r) {
 
 // One road tile per city block (BLOCK m square, world-aligned): intersection at [0,ROAD]^2, road bands along both axes.
 export function roadTexture(BLOCK, ROAD, SW, S = 2048) {
-  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d'), r = rngTex(4242);
+  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d', { willReadFrequently: true }), r = rngTex(4242);
   const px = S / BLOCK, M = v => v * px;
   g.fillStyle = '#8e8b85'; g.fillRect(0, 0, S, S); // pavement colour (under the raised slabs; seen on bridges / far away)
   // asphalt bands
@@ -65,7 +68,7 @@ export function roadTexture(BLOCK, ROAD, SW, S = 2048) {
 
 // paving slabs, texture covers `size` m
 export function pavingTexture(size = 3, S = 512) {
-  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d'), r = rngTex(77);
+  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d', { willReadFrequently: true }), r = rngTex(77);
   const n = 5, s = S / n; g.fillStyle = '#5f5d59'; g.fillRect(0, 0, S, S);
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = 150 + (r() - 0.5) * 22 | 0; g.fillStyle = `rgb(${v},${v - 2},${v - 7})`; g.fillRect(i * s + 2, j * s + 2, s - 4, s - 4); }
   speckle(g, 0, 0, S, S, 26, r);
@@ -74,7 +77,7 @@ export function pavingTexture(size = 3, S = 512) {
   return finish(c);
 }
 export function grassTexture(S = 256) {
-  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d'), r = rngTex(5);
+  const c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d', { willReadFrequently: true }), r = rngTex(5);
   g.fillStyle = '#4a6b2e'; g.fillRect(0, 0, S, S);
   for (let i = 0; i < 9000; i++) { const h = 70 + r() * 40, l = 18 + r() * 22; g.fillStyle = `hsla(${h},45%,${l}%,.6)`; g.fillRect(r() * S, r() * S, 1, 2 + r() * 3); }
   return finish(c);

@@ -16,7 +16,7 @@ class Plume {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
     g.setAttribute('size', new THREE.BufferAttribute(this.size, 1)); g.setAttribute('alpha', new THREE.BufferAttribute(this.alpha, 1));
-    const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+    const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d', { willReadFrequently: true });
     for (let n = 0; n < 9; n++) { // lumpy cauliflower puff
       const cx = 64 + (Math.random() - 0.5) * 40, cy = 64 + (Math.random() - 0.5) * 40, r = 26 + Math.random() * 22;
       const gr = x.createRadialGradient(cx, cy, 0, cx, cy, r); gr.addColorStop(0, 'rgba(255,255,255,.55)'); gr.addColorStop(0.6, 'rgba(255,255,255,.25)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
@@ -61,7 +61,7 @@ class Plume {
 }
 
 function craterTexture(ground) {
-  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d', { willReadFrequently: true });
   const R = 128;
   // broken-in recess: dark core, shaded inner wall (lit from above-left), chipped bright rim, soot halo
   let gr = g.createRadialGradient(R, R, 10, R, R, 126); gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(0.55, 'rgba(25,22,18,.55)'); gr.addColorStop(0.8, 'rgba(30,26,22,.35)'); gr.addColorStop(1, 'rgba(0,0,0,0)');

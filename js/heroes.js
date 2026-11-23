@@ -15,7 +15,7 @@ const cap = (r, l) => new THREE.CapsuleGeometry(r, l, 6, 16);
 const rbox = (w, h, d, rad = 0.03) => new RoundedBoxGeometry(w, h, d, 3, Math.min(rad, w / 2.2, h / 2.2, d / 2.2));
 
 // ---------- procedural textures ----------
-function canvasTex(w, h, draw, srgb = true) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t; }
+function canvasTex(w, h, draw, srgb = true) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d', { willReadFrequently: true }), w, h); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t; }
 function furTextures() {
   const map = canvasTex(512, 512, (g, w, h) => {
     const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#d9701c'); gr.addColorStop(0.5, '#ec8424'); gr.addColorStop(1, '#c45e16'); g.fillStyle = gr; g.fillRect(0, 0, w, h);

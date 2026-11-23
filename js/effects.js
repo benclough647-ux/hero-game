@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Destruction } from './destruction.js';
 // Pooled particle systems (HDR fire for bloom, dust puffs) + expanding shockwave rings.
 function softTexture(kind) {
-  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d', { willReadFrequently: true });
   const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
   if (kind === 'fire') { gr.addColorStop(0, '#fff'); gr.addColorStop(0.25, 'rgba(255,255,255,.75)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); }
   else { gr.addColorStop(0, 'rgba(255,255,255,.9)'); gr.addColorStop(0.5, 'rgba(255,255,255,.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); }
@@ -43,7 +43,7 @@ export class Particles {
   }
 }
 function crackTexture() {
-  const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
+  const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d', { willReadFrequently: true });
   const gr = g.createRadialGradient(64, 64, 4, 64, 64, 62); gr.addColorStop(0, 'rgba(0,0,0,.85)'); gr.addColorStop(0.45, 'rgba(10,8,6,.5)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
   g.fillStyle = gr; g.fillRect(0, 0, 128, 128); g.strokeStyle = 'rgba(0,0,0,.95)'; g.lineCap = 'round';
   for (let k = 0; k < 11; k++) { let x = 64, y = 64, a = k / 11 * Math.PI * 2 + Math.random() * 0.4; g.lineWidth = 3; g.beginPath(); g.moveTo(x, y);
@@ -53,7 +53,7 @@ function crackTexture() {
 const V = new THREE.Vector3(), P = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
 // vapour-cone texture: bright, streaky rim fading towards the apex (cone uv.y: 0 = rim, 1 = apex)
 function vaporTexture() {
-  const c = document.createElement('canvas'); c.width = 256; c.height = 128; const g = c.getContext('2d');
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128; const g = c.getContext('2d', { willReadFrequently: true });
   for (let x = 0; x < 256; x++) { const n = 0.55 + 0.45 * Math.random();
     const gr = g.createLinearGradient(0, 128, 0, 0); gr.addColorStop(0, `rgba(255,255,255,${0.95 * n})`); gr.addColorStop(0.25, `rgba(255,255,255,${0.55 * n})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
     g.fillStyle = gr; g.fillRect(x, 0, 1, 128); }
