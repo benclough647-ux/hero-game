@@ -4,7 +4,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Input } from './input.js';
-import { City, BLOCK, HALF, WATER_Y } from './city.js';
+import { City, BLOCK, HALF } from './city.js';
 import { World } from './world.js';
 import { Traffic } from './traffic.js';
 import { Hero, preloadHeroModels } from './heroes.js';
@@ -19,7 +19,7 @@ import { Combat } from './combat.js';
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: /shot/.test(location.search) });
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.75;
-renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = false; // no shadow maps at all (Xbox performance); lighting is sun + hemisphere + sky IBL
 document.body.prepend(renderer.domElement);
 
 // GPU profile. Xbox Edge (and weak-GPU Edge) runs out of GPU memory with the full hero texture set + HDR targets: the WebGL
@@ -52,7 +52,6 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.25, 9000);
 const world = new World(scene, renderer);
 const city = new City(scene);
-world.reflectionHide = [...city.detail.map(c => c.group), ...city.treeChunks.map(c => c.group), ...city.propMeshes];
 const traffic = new Traffic(scene);
 const fx = new Effects(scene);
 // the player's two heroes (Y swaps; the one you're not using is off-stage) + the two computer-controlled villains
@@ -95,7 +94,6 @@ let quality = null;
 quality = new QualityManager(q => {
   usePost = q.post; view = q.view; world.setQuality(q); city.detailDist = q.detail ?? 600;
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) { if (rt.samples !== q.msaa) { rt.samples = q.msaa; rt.dispose(); } }
-  city.treeMesh.castShadow = q.shadow >= 2048; traffic.body.castShadow = q.shadow >= 1024;
   scene.fog.density = 0.00042 * 1700 / q.view;
   for (const h of everyone) h.setQuality?.(q);
   fx.destruction.setQuality(q);
@@ -122,8 +120,9 @@ function markReady(usedFallback) {
   if (startHint) startHint.style.display = 'block';
   if (loadStatus) loadStatus.style.opacity = '0.7';
   heroes[idx].setVisible(true); for (const v of villains) v.setVisible(true);
-  prewarm();
+  noShadows(scene); prewarm();
 }
+function noShadows(root) { root.traverse(o => { if (o.castShadow || o.receiveShadow) o.castShadow = o.receiveShadow = false; }); }
 // Upload every texture and compile every shader for BOTH heroes (all LOD meshes, glows, jets) up front, so a hero swap never
 // triggers a burst of 2048 texture uploads + shader compiles mid-game (the GPU-memory / stall spike that lost the context on Xbox).
 function prewarm() {
@@ -141,7 +140,6 @@ renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault
 renderer.domElement.addEventListener('webglcontextrestored', () => {
   // (three.js has already re-created its GL state; image textures re-upload from their sources on first use)
   contextLost = false; world.buildEnv(renderer); // the sky IBL lives only on the GPU: without it every surface renders dark
-  const sh = world.sun.shadow; if (sh.map) { sh.map.dispose(); sh.map = null; }
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) rt.dispose();
   if (contextLosses >= 2 && quality.level > 0) { quality.auto = false; quality.level = 0; } // keeps losing it: drop to Low
   if (!quality.safe && contextLosses >= 1) { quality.safe = true; gpuProfile.safe = true; gpuProfile.texCap = 1024; } // first loss: switch to the safe profile
@@ -179,7 +177,7 @@ function switchHero() {
 }
 const lockPt = new THREE.Vector3();
 const free = h => !h.ragdoll && !h.grabbedBy && !h.slammedBy && !h.legGrabbedBy;
-// Y: extreme slow motion for the world (villains, their attacks, projectiles, particles, debris, traffic, water); the hero
+// Y: extreme slow motion for the world (villains, their attacks, projectiles, particles, debris, traffic); the hero
 // you play and the camera keep real time. Eased in/out over ~0.3 s. While a villain holds you, Y is the counter instead.
 const SLOWMO = { rate: 0.1, ease: 9 };
 const slow = { on: false, rate: 1, toggles: 0, heldT: 0 };
@@ -240,8 +238,7 @@ function tick(raw) { // one full game frame (tests drive it directly with a fixe
 }
 function step(dt, raw, noRender) {
   const h = heroes[idx]; Hero.audioHero = h; // only the hero you control plays its looping flight sounds
-  if (city.isWater(h.pos.x, h.pos.z)) fx.waterSpray(h.pos, h.vel, h.pos.y - WATER_Y, WATER_Y, dt);
-  const wdt = dt * slow.rate; // world time (slow motion); the player's own speed lines / spray stay real time
+  const wdt = dt * slow.rate; // world time (slow motion); the player's own speed lines stay real time
   fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120) || (h.superSprint && h.state === 'ground' && Math.hypot(h.vel.x, h.vel.z) > 30), h.def.style === 'fire');
   fx.update(wdt); traffic.update(wdt);
   world.update(wdt, camera, h.pos);

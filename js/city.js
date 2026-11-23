@@ -6,16 +6,33 @@ import { facadeMaterial } from './facade.js';
 // Procedural coastal city, GTA-style street detail: textured asphalt with markings/crossings/manholes/drains, raised
 // kerbed pavements with paving slabs, buildings with per-face window layouts (glass / concrete / brick / stucco),
 // shopfronts + awnings, cornices, parapet walls, rooftop plant rooms / AC units / water tanks / masts, street lamps,
-// traffic lights, benches, bins, hydrants and trees. River with bridges, ocean coastline with seawall + piers.
-// Exposes heightAt(), collide(), isWater() for hero physics. Every collision box top matches the visible surface
+// traffic lights, benches, bins, hydrants and trees. Plain beige sand dunes all around the city and in the old river
+// channel (under the bridges). Exposes heightAt(), collide() (both include the dunes) and groundAt() for hero physics. Every collision box top matches the visible surface
 // (roof deck, parapet, kerb), so heroes stand exactly on what they see.
 export const BLOCK = 80, ROAD = 18, GRID = 40; // 40x40 blocks = 3.2km square
 export const HALF = GRID * BLOCK / 2;
 export const RIVER_I = 30;
 export const RIVER_X0 = -HALF + RIVER_I * BLOCK + ROAD, RIVER_X1 = -HALF + (RIVER_I + 1) * BLOCK;
-export const WATER_Y = -0.6;
 export const SW = 2.2, KERB = 0.15; // pavement strip inside the road band, kerb height
-const LANDFAR = 12000;
+const SAND_E = 15000; // the dunes reach the horizon (fog hides the far edge)
+
+// Sand dunes: one flat-colour low-poly height grid over everything outside the city square + the river channel.
+// Ticks are 40 m near the city, growing geometrically towards the horizon; the dunes start flat at street level at the
+// city edge and rise gently (<= ~6 m) further out. groundAt() interpolates the SAME triangles, so feet match the mesh.
+function duneFn(x, z) {
+  const d = Math.max(Math.abs(x), Math.abs(z)) - HALF; if (d <= 40) return 0;
+  const t = Math.min(1, (d - 40) / 560), a = 6.5 * t * t * (3 - 2 * t);
+  const n = 0.5 + 0.5 * (0.55 * Math.sin(x * 0.0061 + z * 0.0023 + 1.3) + 0.3 * Math.sin(-x * 0.0029 + z * 0.0074 + 0.4) + 0.15 * Math.sin((x + z) * 0.0131 + 2.1));
+  return a * Math.pow(Math.max(0, n), 1.4);
+}
+function sandTicks() {
+  const t = new Set([RIVER_X0, RIVER_X1]);
+  for (let v = -HALF - 1200; v <= HALF + 1200; v += 40) t.add(v);
+  for (let v = HALF + 1200, st = 40; v < SAND_E; st *= 1.3, v += st) { t.add(Math.min(v, SAND_E)); t.add(-Math.min(v, SAND_E)); }
+  t.add(SAND_E); t.add(-SAND_E); return [...t].sort((a, b) => a - b);
+}
+const inCity = (x, z) => x > -HALF + 1e-3 && x < HALF - 1e-3 && z > -HALF + 1e-3 && z < HALF - 1e-3;
+const isRiver = x => x > RIVER_X0 - 1e-3 && x < RIVER_X1 + 1e-3;
 
 function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
@@ -103,12 +120,9 @@ export class City {
     this.mats = { bMat, propMat, furnMat, streetMat, paveMat, kerbMat, parkMat };
     // tame the sky IBL on matte city surfaces (it washed everything out light blue); glass keeps more for reflections
     for (const mm of [propMat, streetMat, paveMat, kerbMat, parkMat]) mm.envMapIntensity = 0.5; bMat.envMapIntensity = 0.8; furnMat.envMapIntensity = 0.6;
-    // land (two sides of the river); the ocean (world.js) only covers the actual water, never under the streets
-    scene.add(landQuad(-HALF - LANDFAR, RIVER_X0, -HALF - LANDFAR, HALF, streetMat), landQuad(RIVER_X1, HALF, -HALF - LANDFAR, HALF, streetMat));
-    const concrete = worldDetail(new THREE.MeshStandardMaterial({ color: 0x8a867f, roughness: 0.9 }), { grain: 0.1, grainScale: 2, tone: 0.2, toneScale: 0.05 });
-    const wall = (x0, x1, z0, z1) => { const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, 6, z1 - z0), concrete); m.position.set((x0 + x1) / 2, -3.02, (z0 + z1) / 2); m.receiveShadow = true; scene.add(m); };
-    wall(-HALF - LANDFAR, HALF + 1, HALF, HALF + 1.5); wall(HALF, HALF + 1.5, -HALF - LANDFAR, HALF + 1.5);
-    wall(RIVER_X0 - 1.5, RIVER_X0, -HALF - LANDFAR, HALF); wall(RIVER_X1, RIVER_X1 + 1.5, -HALF - LANDFAR, HALF);
+    // city ground (two sides of the old river channel); everything else is sand
+    scene.add(landQuad(-HALF, RIVER_X0, -HALF, HALF, streetMat), landQuad(RIVER_X1, HALF, -HALF, HALF, streetMat));
+    this.buildSand(scene);
     // bridges across the river at every street row
     this.bridges = [];
     const deckMat = new THREE.MeshStandardMaterial({ color: 0x5a5d61, roughness: 0.6, metalness: 0.4 });
@@ -285,26 +299,27 @@ export class City {
       this.treeChunks.push({ group: g, cx, cz });
     }
     this.treeMesh = { set castShadow(v) { for (const c of canopies) c.castShadow = v; } };
-    this.buildLandmarks(); this.buildPiers();
+    this.buildLandmarks();
   }
   prop(mesh) { this.propMeshes.push(mesh); return mesh; }
-  buildPiers() {
-    const sc = this.scene, wood = new THREE.MeshStandardMaterial({ color: 0x6b6158, roughness: 0.85 });
-    const shed = new THREE.MeshStandardMaterial({ color: 0x8a9298, roughness: 0.5, metalness: 0.6 });
-    const pileG = new THREE.CylinderGeometry(0.35, 0.35, 8, 6); const piles = [];
-    this.piers = [];
-    for (const px of [-1300, -1020, -700, -420, -120, 200, 520, 1180, 1450]) {
-      const len = 140 + (px % 7) * 6, w = 22, z0 = HALF;
-      const deck = new THREE.Mesh(new RoundedBoxGeometry(w, 1.4, len, 2, 0.3), wood); deck.position.set(px, -0.2, z0 + len / 2); deck.castShadow = deck.receiveShadow = true; sc.add(deck);
-      this.piers.push({ minX: px - w / 2, maxX: px + w / 2, minZ: z0, maxZ: z0 + len, top: 0.5 });
-      if (Math.abs(px) % 3 < 2) { const s = new THREE.Mesh(new THREE.BoxGeometry(w - 6, 9, len * 0.6), shed); s.position.set(px, 5, z0 + len * 0.45); s.castShadow = s.receiveShadow = true; sc.add(s);
-        const rf = new THREE.Mesh(new THREE.CylinderGeometry((w - 6) / 2, (w - 6) / 2, len * 0.6, 12, 1, false, 0, Math.PI), shed); rf.rotation.set(Math.PI / 2, 0, -Math.PI / 2); rf.rotation.order = 'ZXY'; rf.position.set(px, 9.5, z0 + len * 0.45); rf.scale.set(1, 1, 0.35); sc.add(rf);
-        const sx0 = px - (w - 6) / 2, sz0 = z0 + len * 0.15, sz1 = z0 + len * 0.75, R = (w - 6) / 2; // curved roof: stepped collision under the arc
-        for (const f of [1, 0.75, 0.45]) this.piers.push({ minX: px - R * f, maxX: px + R * f, minZ: sz0, maxZ: sz1, top: 9.5 + 0.35 * R * Math.sqrt(1 - f * f * 0.98) }); }
-      for (let z = 4; z < len; z += 10) for (const dx of [-w / 2 + 1, w / 2 - 1]) piles.push([px + dx, z0 + z]);
-    }
-    const pi = new THREE.InstancedMesh(pileG, wood, piles.length), m = new THREE.Matrix4();
-    piles.forEach(([x, z], k) => pi.setMatrixAt(k, m.makeTranslation(x, -3.5, z))); sc.add(pi);
+  buildSand(scene) {
+    const xs = sandTicks(), zs = xs, nx = xs.length, nz = zs.length, H = new Float32Array(nx * nz);
+    for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) H[i * nz + j] = duneFn(xs[i], zs[j]);
+    this.sand = { xs, zs, H, nz };
+    const keep = (i, j) => { const cx = (xs[i] + xs[i + 1]) / 2, cz = (zs[j] + zs[j + 1]) / 2; return !inCity(cx, cz) || isRiver(cx); };
+    const P = new Float32Array(nx * nz * 3); for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) { const k = (i * nz + j) * 3; P[k] = xs[i]; P[k + 1] = H[i * nz + j] - 0.02; P[k + 2] = zs[j]; }
+    const I = []; for (let i = 0; i < nx - 1; i++) for (let j = 0; j < nz - 1; j++) if (keep(i, j)) { const a = i * nz + j, b = (i + 1) * nz + j; I.push(a, a + 1, b + 1, a, b + 1, b); } // split a -> b+1 (matches groundAt)
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(P, 3)); g.setIndex(I); g.computeVertexNormals(); g.computeBoundingSphere();
+    const mat = new THREE.MeshStandardMaterial({ color: 0xd8c29a, roughness: 1, metalness: 0 }); mat.envMapIntensity = 0.55;
+    const m = new THREE.Mesh(g, mat); m.name = 'sandDunes'; scene.add(m); this.sandMesh = m;
+  }
+  // sand surface height (0 inside the city / on the old river bed); same triangles as the mesh
+  groundAt(x, z) {
+    const S = this.sand; if (!S || (inCity(x, z) && !isRiver(x))) return 0;
+    const { xs, zs, H, nz } = S, find = (a, v) => { let lo = 0, hi = a.length - 2; if (v <= a[0]) return 0; if (v >= a[hi + 1]) return hi; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (a[m] <= v) lo = m; else hi = m - 1; } return lo; };
+    const i = find(xs, x), j = find(zs, z), u = Math.min(1, Math.max(0, (x - xs[i]) / (xs[i + 1] - xs[i]))), v = Math.min(1, Math.max(0, (z - zs[j]) / (zs[j + 1] - zs[j])));
+    const h00 = H[i * nz + j], h01 = H[i * nz + j + 1], h10 = H[(i + 1) * nz + j], h11 = H[(i + 1) * nz + j + 1];
+    return u >= v ? h00 + (h10 - h00) * u + (h11 - h10) * v : h00 + (h01 - h00) * v + (h11 - h01) * u; // triangles (a, b, b+1) / (a, a+1, b+1)
   }
   buildLandmarks() {
     const S = this.landmarkSpots, sc = this.scene;
@@ -331,20 +346,15 @@ export class City {
       for (const dx of [-15, 15]) { const t = new THREE.Mesh(new THREE.BoxGeometry(18, 300, 18), mat); t.position.set(o.cx + dx, 150, o.cz); add(t, o, { minX: o.cx + dx - 9, maxX: o.cx + dx + 9, minZ: o.cz - 9, maxZ: o.cz + 9, top: 300 }); }
       const br = new THREE.Mesh(new THREE.BoxGeometry(12, 6, 6), mat); br.position.set(o.cx, 200, o.cz); add(br, o); }
   }
-  isWater(x, z) {
-    if (z > HALF || x > HALF) { for (const p of this.piers) if (x > p.minX && x < p.maxX && z > p.minZ && z < p.maxZ) return false; return true; }
-    if (x > RIVER_X0 && x < RIVER_X1) { for (const [a, b] of this.bridges) if (z > a && z < b) return false; return true; }
-    return false;
-  }
   blockAt(x, z) { const i = Math.floor((x + HALF) / BLOCK), j = Math.floor((z + HALF) / BLOCK); if (i < 0 || j < 0 || i >= GRID || j >= GRID) return null; return this.blocks[i * GRID + j]; }
-  boxesNear(x, z) { const blk = this.blockAt(x, z); if (blk) return blk.b; return (z > HALF - 10) ? this.piers : []; }
+  boxesNear(x, z) { const blk = this.blockAt(x, z); if (blk) return blk.b; return []; }
   heightAt(x, z, r = 0) {
-    let h = 0;
+    let h = this.groundAt(x, z);
     for (const b of this.boxesNear(x, z)) if (x > b.minX - r && x < b.maxX + r && z > b.minZ - r && z < b.maxZ + r) h = Math.max(h, b.top);
     return h;
   }
   collide(pos, vel, r) {
-    let floor = 0;
+    let floor = this.groundAt(pos.x, pos.z);
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       const bs = this.boxesNear(pos.x + dx * BLOCK * 0.5, pos.z + dz * BLOCK * 0.5);
       for (const b of bs) {

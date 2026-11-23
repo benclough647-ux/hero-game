@@ -121,7 +121,6 @@ export class Destruction {
   // a sonic-speed hit throws a huge, long-lived plume, a shower of debris and a deep crater. Caps keep it affordable.
   crash(p, normal, speed, kind = 'wall') {
     if (!(speed >= CRASH.dustMin)) return 0;
-    const city = this.cityRef; if (kind === 'ground' && city?.isWater?.(p.x, p.z) && p.y < 1) return 0;
     const pw = Math.min(CRASH.pwMax, speed / 100), g = Math.pow(pw, 0.75), m = this.mult, ground = kind === 'ground';
     const N = Math.round(Math.min(CRASH.dustCap, 3 + CRASH.dustK * g) * m);
     const sizeK = 0.25 + 0.55 * g, lifeK = 0.35 + 0.45 * g, velK = 0.3 + 0.55 * g;

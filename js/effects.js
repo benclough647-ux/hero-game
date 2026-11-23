@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Destruction } from './destruction.js';
-// Pooled particle systems (HDR fire for bloom, dust puffs, water spray) + expanding shockwave rings.
+// Pooled particle systems (HDR fire for bloom, dust puffs) + expanding shockwave rings.
 function softTexture(kind) {
   const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
   const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -93,7 +93,6 @@ export class Effects {
     this.scene = scene;
     this.fire = new Particles(scene, 3500, { additive: true, size: 0.45 });
     this.dust = new Particles(scene, 900, { size: 3.2, opacity: 0.6, drag: 2.2 });
-    this.spray = new Particles(scene, 2500, { size: 1.5, opacity: 0.75, drag: 0.9 });
     this.debris = new Particles(scene, 700, { size: 0.9, opacity: 1, drag: 0.4 });
     this.spark = new Particles(scene, 900, { additive: true, size: 0.7, drag: 3 });
     // one shared combat light (pre-created so no shader recompiles mid-fight)
@@ -108,7 +107,6 @@ export class Effects {
     this.coneGeo = new THREE.ConeGeometry(1, 1, 48, 1, true); this.coneGeo.translate(0, -0.5, 0); // apex at origin, opening towards -Y
     this.streaks = new Streaks(scene); this.streakTint = new THREE.Color(1.4, 1.5, 1.7);
     this.destruction = new Destruction(scene);
-    this.cSpray0 = new THREE.Color(1.6, 1.7, 1.8); this.cSpray1 = new THREE.Color(0.75, 0.82, 0.88);
   }
   shockwave(p, color = 0xffffff, maxR = 25) {
     const m = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false }));
@@ -169,18 +167,7 @@ export class Effects {
     for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, s = speed * (0.3 + Math.random() * 0.7);
       V.set(Math.cos(a) * s, 0.5 + Math.random() * 3, Math.sin(a) * s); P.copy(p); P.y += 0.3; this.dust.emit(P, V, 0.9 + Math.random() * 1.1, c0, c1); }
   }
-  // rooster-tail spray behind a hero skimming the water surface
-  waterSpray(pos, vel, alt, waterY, dt) {
-    const hs = Math.hypot(vel.x, vel.z); if (hs < 20 || alt > 14) return;
-    const k = (1 - alt / 14) * Math.min(1, hs / 120); const n = Math.ceil(dt * 900 * k);
-    const bx = -vel.x / hs, bz = -vel.z / hs;
-    for (let i = 0; i < n; i++) {
-      P.set(pos.x + bx * (1 + Math.random() * 3) + (Math.random() - 0.5) * 1.5, waterY + 0.2, pos.z + bz * (1 + Math.random() * 3) + (Math.random() - 0.5) * 1.5);
-      const up = (6 + Math.random() * 16) * (0.4 + k), side = (Math.random() - 0.5) * 10 * k;
-      V.set(vel.x * 0.25 + bz * side, up, vel.z * 0.25 - bx * side);
-      this.spray.emit(P, V, 0.7 + Math.random() * 0.9, this.cSpray0, this.cSpray1);
-    }
-  }
+
   // building hit: crack decal on the wall face, chunks of concrete, dust and sparks
   impact(p, normal, power = 1, scorch = false) {
     const m = this.decals[this.decalI]; this.decalI = (this.decalI + 1) % this.decals.length;
@@ -203,7 +190,7 @@ export class Effects {
   update(dt) {
     this.debris.update(dt, -30); this.spark.update(dt, -12); this.destruction.update(dt);
     if (this.lightT > 0) { this.lightT -= dt; if (this.lightT <= 0) this.light.intensity = 0; else this.light.intensity *= Math.exp(-dt * 5 / this.lightDur); }
-    this.fire.update(dt, 6); this.dust.update(dt, 0.8); this.spray.update(dt, -26);
+    this.fire.update(dt, 6); this.dust.update(dt, 0.8);
     this.booms = this.booms.filter(b => { b.t += dt / b.dur; const e = 1 - Math.pow(1 - Math.min(1, b.t), 3), k = b.k || 1;
       if (b.follow && b.t < 0.45) b.m.position.copy(b.follow).addScaledVector(b.d, b.off);
       const r = (1.2 + 5.5 * e) * k, l = (3 + 18 * e) * k; b.m.scale.set(r, l, r); let op = 0.6 * Math.pow(1 - Math.min(1, b.t), 1.5);
