@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PLAYER_GRAB } from './heroes.js';
 import { whooshSound, roarSound, fireBlastSound, punchSound, laserSound, setWorldSfx } from './audio.js';
 // Combat: the player (Tiger or Centurion) vs two computer-controlled villains at once (coordinated: one grab at a time,
 // staggered attacks), player-only beams (Tiger roar blast / Centurion eye beam),
@@ -224,7 +225,7 @@ export class Combat {
     h.cd[type] = MOVES[type].cd;
     if (type === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
     if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.mv.tackleSpeed * 1.25;
-      h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.mv.tackleSpeed * 0.6)); // explosive launch
+      h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.mv.tackleSpeed * (h === this.player ? PLAYER_GRAB.launch * PLAYER_GRAB.speed : 0.6))); // explosive launch (the player's is harder)
       if (h.def.style === 'fire') h.fireBurst(h.pos, 70, 20); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 18); this.shakeNear(h.pos, 0.25); }
     if (type === 'punch') this.startDash(h, target);
     return true;

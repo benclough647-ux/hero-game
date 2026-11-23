@@ -362,6 +362,9 @@ const SKIN_LOOPS = new Set(['idle', 'run', 'air', 'fly_hover', 'fly_fast', 'fly_
 const SKIN_DRIVEN = new Set(['blast', 'punch', 'hit', 'getup', 'crouch', 'counter_kick', 'counter_slam', 'land_boom', 'leg_grab_spin', 'leg_counter_curl_punch']);
 // rival AI moves a little faster than the player on the same hero (run / sprint / flight / boost / tackle)
 export const AI_SPEED = 1.09;
+// the player's grab (tackle) is quicker than the villains' (Ben): harder launch, faster drive and turn-in to contact,
+// shorter arm wind-up, quicker settle into the choke hold. Villain grab timing is unchanged.
+export const PLAYER_GRAB = { launch: 0.9, speed: 1.3, accel: 22, armT: 0.07, settle: 14 };
 // grounded super sprint (LS click on the ground): multiple of run speed
 // villain sonic boom on boost: cooldown (s), audio reference distance (m: half volume at ~ref)
 export const VBOOM = { cd: 4, ref: 60 };
@@ -825,7 +828,7 @@ export class Hero {
         over = act.type; overW = 1;
         if (act.type === 'punch') drive('punch', act.t * 1.6);       // fist lands ~0.16 s (game hit window)
         else if (act.type === 'blast') drive('blast', act.t);           // hand up by ~0.12 s, blast fires at 0.14 s
-        else if (act.type === 'tackle' && act.t < dt * 1.5) acts.tackle.time = 0;
+        else if (act.type === 'tackle') { if (act.t < dt * 1.5) acts.tackle.time = 0; acts.tackle.timeScale = this.isPlayer === true ? 1.8 : 1; } // player: snappier reach
       } else if (this.knockT > 0 && has('hit')) { over = 'hit'; overW = 1; drive('hit', (0.45 - this.knockT) / 0.45 * acts.hit.getClip().duration); }
       if (over) { for (const n in tgt) tgt[n] *= 1 - overW; tgt[over] = overW; }
     }
@@ -1014,7 +1017,7 @@ export class Hero {
     const B = A.B, act = this.action, t = this.t;
     const F = _cf.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)), Rt = _cr.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw)), U = _cu.set(0, 1, 0);
     const hold = act && act.type === 'tackle' && act.mode && act.mode !== 'drive' && this.grabbing;
-    this.holdW = THREE.MathUtils.clamp((this.holdW || 0) + (hold || (act && act.mode === 'punch' && act.strikeT !== undefined) ? dt * 7 : (Hero.debugOld ? -dt * 5 : -dt * 2.5)), 0, 1);
+    this.holdW = THREE.MathUtils.clamp((this.holdW || 0) + (hold || (act && act.mode === 'punch' && act.strikeT !== undefined) ? dt * (this.isPlayer === true ? PLAYER_GRAB.settle : 7) : (Hero.debugOld ? -dt * 5 : -dt * 2.5)), 0, 1);
     const att = Hero.debugOld ? this.holdW : this.holdW * this.holdW * (3 - 2 * this.holdW); // smoothstep: no lurch at either end of the blend
     const live = hold || (act && act.type === 'tackle' && act.mode === 'punch');
     if (att > 0 && !live && this._chokeLast && !Hero.debugOld) { // fading out after the hold / charged punch ends: ease out of the LAST pose,
@@ -1131,9 +1134,9 @@ export class Hero {
       const fl = city.heightAt(this.pos.x, this.pos.z, 0.5); if (this.pos.y < fl + 1.0) this.vel.y = Math.max(this.vel.y, (fl + 1.0 - this.pos.y) * 4);
     } else if (act && act.type === 'tackle' && !stun) {
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
-      const spd = this.grabbing ? act.carrySpeed : d.tackleSpeed;
+      const pg = this.isPlayer === true && !this.grabbing, spd = this.grabbing ? act.carrySpeed : d.tackleSpeed * (pg ? PLAYER_GRAB.speed : 1);
       const dir = this.grabbing ? act.carryDir : this.aim;
-      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : act.homing ? 15 : 9))); // homing tackles follow the re-aimed direction tightly
+      this.vel.lerp(_v.copy(dir).multiplyScalar(spd), Math.min(1, dt * (this.grabbing ? 12 : pg ? PLAYER_GRAB.accel : act.homing ? 15 : 9))); // homing tackles follow the re-aimed direction tightly
     }
     // punch dash: drive straight at the target at dash speed (combat.dashStep re-aims and ends it)
     if (act && act.type === 'punch' && act.dash && !stun) {
@@ -1349,7 +1352,7 @@ export class Hero {
       else if (a.type === 'punch') {
         if (a.t < 0.13) { rx = 0.7 * (a.t / 0.13); ro = 0.25; } else { const e = Math.min(1, (a.t - 0.13) / 0.06) * (k > 0.75 ? (1 - k) / 0.25 : 1); rx = 0.7 + (forward - 0.7) * e; ro = -0.12 * e; }
         lx = 0.35; lo = 0.2;
-      } else if (a.type === 'tackle') { const up = Math.min(1, a.t / 0.15); rx = lx = -2.85 * up; ro = lo = -0.12 * up; }
+      } else if (a.type === 'tackle') { const up = Math.min(1, a.t / (this.isPlayer === true ? PLAYER_GRAB.armT : 0.15)); rx = lx = -2.85 * up; ro = lo = -0.12 * up; }
     }
     const L = (o, v, s) => o + (v - o) * Math.min(1, dt * s), A = this.arm, sp = a ? 30 : 12;
     A.rx = L(A.rx, rx, sp); A.lx = L(A.lx, lx, sp); A.rz = L(A.rz, ro, sp); A.lz = L(A.lz, lo, sp);
