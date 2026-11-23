@@ -5,13 +5,23 @@ export const PRESETS = [
   { name: 'High', pixel: 1.0, post: true, msaa: 4, shadow: 2048, shadowExtent: 170, water: 512, view: 1700, detail: 450 },
 ];
 export class QualityManager {
-  constructor(apply) {
+  // opts.safe: Xbox / weak-GPU Edge profile (see gpuProfile in main.js): same look and tone mapping, lighter GPU memory use
+  constructor(apply, opts = {}) {
+    this.safe = !!opts.safe; this.postOk = opts.postOk !== false;
     this.apply = apply; const qs = new URLSearchParams(location.search).get('q');
     this.auto = qs === null; const xbox = /Xbox/i.test(navigator.userAgent);
     this.level = qs !== null ? Math.max(0, Math.min(2, +qs)) : (xbox ? 1 : 2);
-    this.acc = 0; this.frames = 0; this.warm = 3; this.apply(PRESETS[this.level]);
+    this.acc = 0; this.frames = 0; this.warm = 3; this.apply(this.preset);
   }
-  get preset() { return PRESETS[this.level]; }
+  get preset() {
+    const P = PRESETS[this.level];
+    if (!this.safe && this.postOk) return P;
+    if (!this.safe) return { ...P, post: false };
+    // safe: pixel ratio <= 1, no MSAA, shadow map <= 1024, no planar-reflection water (it re-renders the whole scene) and no
+    // half-float HDR render targets at all (post off): the renderer then tone-maps (ACES, same exposure) + sRGB-encodes straight
+    // to the canvas, which is exactly what the OutputPass does, so the picture keeps the same brightness
+    return { ...P, safe: true, pixel: Math.min(P.pixel, 1), msaa: 0, shadow: Math.min(P.shadow, 1024), shadowExtent: P.shadow ? Math.min(P.shadowExtent, 110) : 0, water: 0, post: false };
+  }
   cycle() { this.auto = false; this.level = (this.level + 2) % 3; this.apply(this.preset); return this.preset.name; }
   // returns a message when quality changed
   sample(rawDt) {

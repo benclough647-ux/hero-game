@@ -38,8 +38,8 @@ export class World {
     this.sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - 40), THREE.MathUtils.degToRad(160));
     u.sunPosition.value.copy(this.sunDir);
     scene.add(sky); this.sky = sky;
-    // IBL from the sky
-    const pm = new THREE.PMREMGenerator(renderer); const envScene = new THREE.Scene(); const sky2 = new Sky(); sky2.scale.setScalar(1000);
+    // IBL from the sky (kept so it can be rebuilt after a WebGL context loss: a PMREM render target has no CPU copy)
+    const envScene = new THREE.Scene(); this.envScene = envScene; const sky2 = new Sky(); sky2.scale.setScalar(1000);
     sky2.material.uniforms.turbidity.value = 9; sky2.material.uniforms.rayleigh.value = 1.1; sky2.material.uniforms.mieCoefficient.value = 0.006; sky2.material.uniforms.sunPosition.value.copy(this.sunDir);
     envScene.add(sky2); const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16), new THREE.MeshBasicMaterial({ color: 0x4a4641 })); ground.rotation.x = -Math.PI / 2; ground.position.y = -20; envScene.add(ground);
     // a ring of warm-grey "city" around the horizon: in a street canyon most of what you see is buildings, not blue sky,
@@ -47,7 +47,7 @@ export class World {
     const ring = new THREE.Mesh(new THREE.CylinderGeometry(800, 800, 300, 32, 1, true), new THREE.MeshBasicMaterial({ color: 0x77716a, side: THREE.BackSide })); ring.position.y = 130; envScene.add(ring);
     // and a thin warm-grey veil over the whole sky: shadows read neutral grey-blue (GTA-like) instead of saturated blue
     const veil = new THREE.Mesh(new THREE.SphereGeometry(850, 24, 12), new THREE.MeshBasicMaterial({ color: 0x8c8780, side: THREE.BackSide, transparent: true, opacity: 0.42, depthWrite: false })); envScene.add(veil);
-    scene.environment = pm.fromScene(envScene, 0.02).texture; pm.dispose();
+    this.buildEnv(renderer);
     scene.fog = new THREE.FogExp2(0xbccbd6, 0.00042); scene.background = new THREE.Color(0xbccbd6);
     // lights: soft sky fill + sun
     this.hemi = new THREE.HemisphereLight(0xdfeaff, 0x6a5f50, 0.4); scene.add(this.hemi);
@@ -69,6 +69,10 @@ export class World {
     this.cheapWater = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x0b2c3c, roughness: 0.06, metalness: 0.3, normalMap: n2, normalScale: new THREE.Vector2(0.35, 0.35) }));
     this.cheapWater.rotation.x = -Math.PI / 2; this.cheapWater.position.y = WATER_Y; scene.add(this.cheapWater);
     this.t = 0;
+  }
+  buildEnv(renderer) { // (re)bake the sky/city IBL; without it every PBR surface goes dark
+    const pm = new THREE.PMREMGenerator(renderer), old = this.envRT;
+    this.envRT = pm.fromScene(this.envScene, 0.02); this.scene.environment = this.envRT.texture; pm.dispose(); old?.dispose();
   }
   setQuality(q) {
     this.waters[512].visible = q.water === 512; this.waters[256].visible = q.water === 256; this.cheapWater.visible = !q.water;

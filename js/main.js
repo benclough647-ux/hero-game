@@ -22,6 +22,32 @@ renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.A
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
+// GPU profile. Xbox Edge (and weak-GPU Edge) runs out of GPU memory with the full hero texture set + HDR targets: the WebGL
+// context is lost (white / blank screen, typically on a hero swap when the other hero's 2048 maps upload) and comes back
+// with no IBL (everything dark). Safe profile: textures capped at 1024, pixel ratio <= 1, lighter targets, same tone mapping.
+const gpuProfile = (() => {
+  const gl = renderer.getContext(), ua = navigator.userAgent, qs = new URLSearchParams(location.search);
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info'), gpu = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+  const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
+  const halfFloatRT = renderer.capabilities.isWebGL2 ? !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float')) : !!gl.getExtension('EXT_color_buffer_half_float');
+  const xbox = /Xbox/i.test(ua), edge = /\bEdg(e|A|iOS)?\//.test(ua);
+  const weak = maxTex < 8192 || !halfFloatRT || /llvmpipe|Basic Render/i.test(gpu);
+  const safe = qs.has('nosafe') ? false : qs.has('safe') || xbox || (edge && weak);
+  return { safe, xbox, edge, gpu, maxTex, halfFloatRT, texCap: safe ? 1024 : Math.min(4096, maxTex) };
+})();
+const _capped = new WeakMap(); // texture -> cap it was last checked against
+function capTexture(t, cap) { // downscale an image texture to <= cap px (keeps aspect); safe before or after upload
+  if (!t || _capped.get(t) <= cap || t.isRenderTargetTexture || t.isDataTexture || t.isCompressedTexture || t.isCubeTexture) return;
+  const im = t.image, w = im?.width, h = im?.height; _capped.set(t, cap);
+  if (!w || !h || (w <= cap && h <= cap)) return;
+  try {
+    const s = cap / Math.max(w, h), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+    c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); t.dispose(); t.image = c; t.needsUpdate = true; im.close?.();
+  } catch (e) { console.warn('texture cap failed', e); }
+}
+const TEX_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap', 'bumpMap', 'lightMap'];
+function eachTexture(root, fn) { root.traverse(o => { const ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : []; for (const m of ms) { for (const k of TEX_KEYS) if (m[k]) fn(m[k], m); if (m.uniforms) for (const u of Object.values(m.uniforms)) if (u?.value?.isTexture) fn(u.value, m); } }); }
+
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.25, 9000);
 const world = new World(scene, renderer);
@@ -50,10 +76,17 @@ const NOINP = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, boost: 0, descend: 0 };
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.22, 0.5, 1.0); composer.addPass(bloom);
+// a single NaN / Inf pixel (some GPUs: degenerate normal-map tangent frames, huge emissive in half float) is blurred by bloom
+// over the whole screen -> white-out. Drop non-finite texels and clamp HDR before the bloom chain.
+if (renderer.capabilities.isWebGL2) bloom.materialHighPassFilter.fragmentShader = bloom.materialHighPassFilter.fragmentShader.replace('vec4 texel = texture2D( tDiffuse, vUv );',
+  'vec4 texel = texture2D( tDiffuse, vUv ); if ( any( isnan( texel ) ) || any( isinf( texel ) ) ) texel = vec4( 0.0 ); texel = clamp( texel, 0.0, 64.0 );');
 composer.addPass(new OutputPass());
 let usePost = true, view = 1700;
 function resize() {
-  const p = quality ? quality.preset.pixel : 1, pr = Math.min(devicePixelRatio, 1.25) * p;
+  const p = quality ? quality.preset.pixel : 1; let pr = Math.min(devicePixelRatio, gpuProfile.safe ? 1 : 1.25) * p;
+  if (gpuProfile.safe) pr = Math.min(pr, 1920 / innerWidth, 1080 / innerHeight); // safe profile: internal resolution <= 1920x1080
+  // the same colour pipeline on every device (post on or off): ACES tone mapping, fixed exposure, sRGB output
+  renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.75;
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight);
   bloom.setSize(innerWidth * pr / 2, innerHeight * pr / 2);
@@ -67,7 +100,8 @@ quality = new QualityManager(q => {
   for (const h of everyone) h.setQuality?.(q);
   fx.destruction.setQuality(q);
   if (quality) resize();
-});
+}, { safe: gpuProfile.safe, postOk: gpuProfile.halfFloatRT });
+if (gpuProfile.safe) console.info('Graphics: safe GPU profile', JSON.stringify({ xbox: gpuProfile.xbox, edge: gpuProfile.edge, gpu: gpuProfile.gpu, maxTex: gpuProfile.maxTex, halfFloatRT: gpuProfile.halfFloatRT }));
 resize(); addEventListener('resize', resize);
 
 const start = document.getElementById('start'); let started = false, assetsReady = false;
@@ -88,7 +122,32 @@ function markReady(usedFallback) {
   if (startHint) startHint.style.display = 'block';
   if (loadStatus) loadStatus.style.opacity = '0.7';
   heroes[idx].setVisible(true); for (const v of villains) v.setVisible(true);
+  prewarm();
 }
+// Upload every texture and compile every shader for BOTH heroes (all LOD meshes, glows, jets) up front, so a hero swap never
+// triggers a burst of 2048 texture uploads + shader compiles mid-game (the GPU-memory / stall spike that lost the context on Xbox).
+function prewarm() {
+  try {
+    if (gpuProfile.safe) eachTexture(scene, t => capTexture(t, gpuProfile.texCap));
+    const shown = []; for (const h of everyone) h.rig.root.traverse(o => { shown.push([o, o.visible]); o.visible = true; });
+    renderer.compile(scene, camera);
+    const seen = new Set(); eachTexture(scene, t => { if (!seen.has(t)) { seen.add(t); renderer.initTexture(t); } });
+    for (const [o, v] of shown) o.visible = v;
+  } catch (e) { console.warn('prewarm failed', e); }
+}
+// WebGL context loss (GPU reset / out of memory on consoles): keep the page alive, then rebuild what has no CPU-side copy
+let contextLost = false, contextLosses = 0;
+renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); contextLost = true; contextLosses++; console.warn('WebGL context lost'); }, false);
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  // (three.js has already re-created its GL state; image textures re-upload from their sources on first use)
+  contextLost = false; world.buildEnv(renderer); // the sky IBL lives only on the GPU: without it every surface renders dark
+  const sh = world.sun.shadow; if (sh.map) { sh.map.dispose(); sh.map = null; }
+  for (const rt of [composer.renderTarget1, composer.renderTarget2]) rt.dispose();
+  if (contextLosses >= 2 && quality.level > 0) { quality.auto = false; quality.level = 0; } // keeps losing it: drop to Low
+  if (!quality.safe && contextLosses >= 1) { quality.safe = true; gpuProfile.safe = true; gpuProfile.texCap = 1024; } // first loss: switch to the safe profile
+  quality.apply(quality.preset); prewarm();
+  hud.say(`Graphics restored (${quality.preset.name})`); console.warn('WebGL context restored');
+}, false);
 
 preloadHeroModels((p, url) => {
   const name = typeof url === 'string' ? url.split('/').pop() : '';
@@ -140,7 +199,7 @@ function combatFrame(dt, inp) {
 }
 const clock = new THREE.Clock();
 let paused = false;
-function render() { if (usePost) composer.render(); else renderer.render(scene, camera); }
+function render() { if (contextLost) return; if (usePost) composer.render(); else renderer.render(scene, camera); }
 function frame() {
   requestAnimationFrame(frame);
   if (paused) return;
@@ -173,4 +232,4 @@ frame();
 window.__game = { heroes, villains, everyone, city, cam, combat, combatFrame, get enemy() { return villains[0]; }, get focus() { return combat.focus(heroes[idx], cam.forward); },
   solo(on = true) { const B = villains[1]; if (on) { combat.reset(B, heroes[idx].pos.clone().add(new THREE.Vector3(2500, 0, 2500)).setY(0)); B.parked = true; } else { B.parked = false; combat.respawnNear(B, heroes[idx]); } }, // tests: park villain B far away
   get other() { return heroes[idx ^ 1]; }, hud, camera, get active() { return heroes[idx]; }, switchHero, input, renderer, quality, begin, step, render,
-  setPaused(v) { paused = v; }, scene, THREE, get ready() { return assetsReady; }, markReady };
+  setPaused(v) { paused = v; }, scene, THREE, gpuProfile, get contextLosses() { return contextLosses; }, prewarm, get ready() { return assetsReady; }, markReady };
