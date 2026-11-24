@@ -187,7 +187,7 @@ export class Combat {
     const D = this.dodgeIn, ax = Math.abs(x); D.rt += dt; D.cd = Math.max(0, D.cd - dt); this.counterWin = Math.max(0, this.counterWin - dt);
     if (ax < DODGE.centre) { D.centreT = D.rt; D.armed = true; }
     if (this.lockOn) {
-      if (inp && ax >= DODGE.centre) inp.lookX = 0; // while locked the stick X is the dodge, not a camera orbit
+      if (inp && x) inp.lookX = 0; // while locked the right stick X is the dodge, not a camera orbit (mouse look unaffected)
       if (inp && Math.abs(y) >= LOCKSW.flick) inp.lookY = 0;
       if (F.armed && F.cd <= 0 && Math.abs(y) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, y < 0 ? 1 : -1); }
       if (inp?.swX && F.cd <= 0 && !F.kbHeld) { F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(inp.swX)); } F.kbHeld = !!inp?.swX;
