@@ -11,18 +11,24 @@ const t1 = V(), t2 = V(), t3 = V(), t4 = V(), t5 = V();
 const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
-// lock switching: flick the right stick left / right (raw axis) while locked on. The stick must return inside `dead`
-// before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
-export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 }; // (now the stick's UP / DOWN flick: left / right is the dodge)
-// lock-on dodge (Ben): flick the right stick left / right (from near-centre past `flick` within `window` s; keyboard Shift+A / D)
-// while locked on: a very fast sidestep around the target (`dist` m in `dur` s) with i-frames (`iframes` s: punches and grabs
-// miss, villain tackles in flight lose their homing), a wind (Centurion) / flame (Tiger) burst, and world slow motion for a
-// `slowT` s real-time counter window (main.js); hits landed in that window knock back `bonus` x harder.
+// lock switching: flick the right stick UP / DOWN (raw axis) while locked on (keyboard [ / ]). The stick must return inside
+// `dead` before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
+export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 };
+// right-stick LEFT / RIGHT flick (from near-centre past `flick` within `window` s) swaps hero, with a cooldown; D-pad left /
+// right still swaps too. A slow camera look is not a flick.
+export const HEROFLICK = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.4 };
+// lock-on dodge (Ben): tap LB / RB (keyboard Shift+A / D) while locked on for a very fast sidestep around the target
+// (`dist` m in `dur` s) with i-frames (`iframes` s: punches and grabs miss, villain tackles in flight lose their homing),
+// a wind (Centurion) / flame (Tiger) burst. World slow motion and the `slowT` s counter window (main.js, hits knock back
+// `bonus` x harder) only start if the dodge evades an incoming villain attack that would have landed inside the i-frame
+// window, or that is telegraphed and lands within `after` s after the i-frames. Y slow-mo stays on. While locked on, a
+// bumper tap (<= `tap` s) dodges and a hold is still descend (LB) / boost (RB); when not locked on the bumpers are
+// descend / boost only, with no delay.
 // flying ram (Ben): fly into a villain at full flight speed (>= minSpeed) without pressing grab: impact boom, and they're
 // carried ahead of your chest along your flight (no hand grip) until you slow down (< stopK x the impact speed), turn
 // more than ~turnDeg away, hit something (wall smash) or maxT runs out; then they're flung on along the carry
 export const RAM = { minSpeed: 80, aheadDot: 0.5, closeSpeed: 40, r: 2.4, stopK: 0.45, turnDot: 0.64, maxT: 1.5, minT: 0.1 };
-export const DODGE = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.6, dist: 7, dur: 0.15, iframes: 0.3, slowT: 1.75, bonus: 1.2 };
+export const DODGE = { cd: 0.6, dist: 12, dur: 0.15, iframes: 0.3, slowT: 1.75, bonus: 1.2, tap: 0.14, after: 0.25 };
 // choke grab, A: super-fast face-first slam into the ground. Lift `lift` m, then dive at base speed accelerating at `accel`
 // (impact speed = sqrt(base^2 + 2*accel*height) + carried speed); crater / dust / damage scale with that momentum.
 export const SLAM = { windup: 0.12, lift: 3, base: 120, accel: 2600, maxSpeed: 520, dmg0: 62, dmgK: 0.09, dmgMax: 110, down: 2.4, dustK: 0.7, angle: 0.18 };
@@ -151,7 +157,8 @@ export class Combat {
     this.scene = scene; this.fx = fx; this.city = city; this.cam = cam; this.hud = hud;
     this.projectiles = []; this.t = 0; this.wt = 0; this.lastCombat = -99; this.enemies = [];
     this.coord = { lastAtk: -9, lead: 0, leadT: 5, starts: [] }; // villain coordination (see VILLAIN_AI)
-    this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null; this.dodgeIn = { rt: 0, centreT: 0, armed: true, cd: 0, n: 0 }; this.counterWin = 0;
+    this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null; this.dodgeIn = { cd: 0, n: 0 }; this.counterWin = 0;
+    this.heroFlick = { rt: 0, centreT: 0, armed: true, cd: 0, n: 0 }; this.bump = { lb: false, rb: false, lbT: 0, rbT: 0 }; this.wRate = 1;
     this.stats = { hits: [] }; // for automated tests
     // light-ray beam: additive HDR core + soft glow cylinder (bloom picks up the >1 colour)
     const g = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true); g.translate(0, 0.5, 0); g.rotateX(Math.PI / 2);
@@ -221,17 +228,15 @@ export class Combat {
       if (this.lockOn) { this.setLock(false); this.hud?.say('Lock off'); }
       else { const t = this.bestLock(P); if (t) { this.setLock(true, t); this.hud?.say(`Locked on: ${t.def.name}`); } else this.hud?.say('No target in range'); }
     }
-    // right-stick flick UP / DOWN to switch target (keyboard [ / ]); flick LEFT / RIGHT = dodge
+    // right-stick flick LEFT / RIGHT = switch hero (prepareInput); UP / DOWN while locked on = switch villain (keyboard [ / ])
     const F = this.flick, y = inp?.rsY ?? 0, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
     if (Math.abs(y) < LOCKSW.dead) F.armed = true;
-    const D = this.dodgeIn, ax = Math.abs(x); D.rt += dt; D.cd = Math.max(0, D.cd - dt); this.counterWin = Math.max(0, this.counterWin - dt);
-    if (ax < DODGE.centre) { D.centreT = D.rt; D.armed = true; }
+    const D = this.dodgeIn; D.cd = Math.max(0, D.cd - dt); this.counterWin = Math.max(0, this.counterWin - dt);
+    const ax = Math.abs(x), ay = Math.abs(y);
     if (this.lockOn) {
-      if (inp && x) inp.lookX = 0; // while locked the right stick X is the dodge, not a camera orbit (mouse look unaffected)
-      if (inp && Math.abs(y) >= LOCKSW.flick) inp.lookY = 0;
-      if (F.armed && F.cd <= 0 && Math.abs(y) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, y < 0 ? 1 : -1); }
+      if (inp && ay >= LOCKSW.flick && ay > ax) inp.lookY = 0;
+      if (F.armed && F.cd <= 0 && ay > LOCKSW.flick && ay > ax) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, y < 0 ? 1 : -1); }
       if (inp?.swX && F.cd <= 0 && !F.kbHeld) { F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(inp.swX)); } F.kbHeld = !!inp?.swX;
-      if (ax > DODGE.flick && D.armed) { D.armed = false; if (D.rt - D.centreT <= DODGE.window + 1e-6 && D.cd <= 0) this.startDodge(P, Math.sign(x)); } // a slow push isn't a flick
       if (inp && (inp.dodgeLPressed || inp.dodgeRPressed) && D.cd <= 0) this.startDodge(P, inp.dodgeRPressed ? 1 : -1);
       const E = this.lockTgt, far = P.pos.distanceTo(E.pos) > LOCK.lose;
       if (far || E.ko) this.lockLostT += dt; else this.lockLostT = 0;
@@ -243,6 +248,65 @@ export class Combat {
     }
     this.updateReticle(dt, this.lockTgt);
   }
+  // bumper tap / hold (locked on only) + right-stick flick to swap hero. Called once per frame, before the player moves
+  // so a locked-on bumper tap doesn't also apply a sliver of boost / descend.
+  prepareInput(dt, inp) {
+    if (!inp) return;
+    this.pollHeroFlick(dt, inp);
+    const B = this.bump, tap = DODGE.tap;
+    if (!this.lockOn) { B.lb = B.rb = false; return; }
+    if (inp.lbPressed) { B.lb = true; B.lbT = 0; }
+    if (inp.rbPressed) { B.rb = true; B.rbT = 0; }
+    if (B.lb) {
+      B.lbT += dt;
+      if (inp.lb && B.lbT <= tap + 1e-6) inp.descend = inp.descendKey || 0; // still in the tap window: don't descend
+      if (inp.lbReleased) { if (B.lbT <= tap + 1e-6) inp.dodgeLPressed = true; B.lb = false; }
+      else if (B.lbT > tap) { if (inp.lb) inp.descend = Math.max(inp.descend || 0, 1); B.lb = false; }
+    }
+    if (B.rb) {
+      B.rbT += dt;
+      if (inp.rb && B.rbT <= tap + 1e-6) inp.boost = inp.boostKey || 0;
+      if (inp.rbReleased) { if (B.rbT <= tap + 1e-6) inp.dodgeRPressed = true; B.rb = false; }
+      else if (B.rbT > tap) { if (inp.rb) inp.boost = Math.max(inp.boost || 0, 1); B.rb = false; }
+    }
+  }
+  pollHeroFlick(dt, inp) {
+    const H = this.heroFlick, x = inp.rsX ?? 0, y = inp.rsY ?? 0, ax = Math.abs(x), ay = Math.abs(y);
+    H.rt += dt; H.cd = Math.max(0, H.cd - dt);
+    if (ax < HEROFLICK.centre) { H.centreT = H.rt; H.armed = true; }
+    if (ax > HEROFLICK.flick && H.armed) {
+      H.armed = false;
+      if (H.rt - H.centreT <= HEROFLICK.window + 1e-6 && H.cd <= 0 && ax >= ay) {
+        inp.swapPressed = true; inp.lookX = 0; H.cd = HEROFLICK.cd; H.n++;
+      }
+    }
+  }
+  // an incoming villain punch / grab / body-tackle that would land during the i-frames, or is telegraphed and lands
+  // during the dodge or just after (`iframes + after` seconds of real time)
+  evadesIncoming(P) {
+    const win = DODGE.iframes + DODGE.after, wr = this.wRate > 1e-3 ? this.wRate : 1;
+    for (const e of this.enemies) {
+      const a = e.action; if (!a || a.done || e.ko || e.ragdoll || e.grabbing) continue;
+      if (a.mode && a.mode !== 'drive') continue;
+      const kind = a.kind || a.type; if (kind !== 'punch' && kind !== 'grab' && kind !== 'tackle') continue;
+      if (a.target && a.target !== P) continue;
+      if (!a.target) {
+        const to = this.chest(P, t1).sub(this.chest(e, t2)), d = to.length();
+        if (d > 40 || (d > 1e-3 && to.dot(e.aim) < 0.5 * d)) continue;
+      }
+      const inPlay = a.warn || a.pending || a.telegraph > 0 || a.dash || a.type === 'tackle' || a.type === 'punch';
+      if (!inPlay) continue;
+      if (a.impactAt != null) {
+        const remainR = (a.impactAt - this.wt) / wr;
+        if (remainR <= win + 1e-4 && remainR > -0.2) return true;
+      } else {
+        const d = this.chest(P, t1).distanceTo(this.chest(e, t2));
+        const sp = a.dash?.speed || e.vel.length() || 80;
+        if (d / Math.max(sp, 8) <= win) return true;
+      }
+    }
+    return false;
+  }
   // ---------- lock-on dodge ----------
   startDodge(P, s) {
     const E = this.lockTgt;
@@ -252,15 +316,17 @@ export class Combat {
     const side = V(-to.z, 0, to.x).multiplyScalar(s); // s = +1: to the player's right (as seen looking at the target)
     P.dodge = { t: 0, dur: DODGE.dur, s, tgt: E, r, v: side.clone().multiplyScalar(DODGE.dist / DODGE.dur), side };
     P.vel.copy(P.dodge.v); P.invulnT = Math.max(P.invulnT, DODGE.iframes); P.dodgeUntil = this.t + DODGE.iframes; this.dodgeIn.cd = DODGE.cd; this.dodgeIn.n++;
-    for (const e of this.enemies) { const a = e.action; // grab attempts in progress lose the player: they fly past
-      if (a && a.type === 'tackle' && !e.grabbing && a.target === P) { a.target = null; a.dodged = true; }
-      if (a && a.type === 'punch' && a.target === P) { a.target = null; a.dodged = true; } }
+    const evaded = this.evadesIncoming(P);
+    for (const e of this.enemies) { const a = e.action; // only attacks that would have landed in the evade window lose the player
+      if (!evaded || !a || a.target !== P) continue;
+      if (a.type === 'tackle' && !e.grabbing) { a.target = null; a.dodged = true; }
+      if (a.type === 'punch') { a.target = null; a.dodged = true; } }
     const fire = P.def.style === 'fire', c = this.chest(P, V());
     if (fire) { P.fireBurst?.(P.pos, 45, 16); this.fx.shockwaveOriented?.(c, side.clone().negate(), 0xff8a30, 9, 0.35, 0.7); }
     else { this.fx.shockwaveOriented?.(c, side.clone().negate(), 0xe8f0ff, 9, 0.35, 0.7); this.fx.shockwave(P.pos.clone().setY(P.pos.y + 0.2), 0xe8e2d0, 6); }
     this.burst(c, P, 14, 7); whooshSound(fire); if (P.isPlayer) { P.fovKick = (P.fovKick || 0) + 6; this.cam.shake?.(0.1); }
-    this.counterWin = DODGE.slowT; this.onDodge?.(P, s);
-    this.stats.hits.push({ t: this.t, kind: 'dodge', amount: 0, dir: s, target: E.key });
+    if (evaded) { this.counterWin = DODGE.slowT; this.onDodge?.(P, s); }
+    this.stats.hits.push({ t: this.t, kind: 'dodge', amount: 0, dir: s, target: E.key, evaded });
     return true;
   }
   dodgeStep(dt, P) { // strafe around the target at a constant radius; flame / wind trail
@@ -487,7 +553,7 @@ export class Combat {
   // ---------- per-frame ----------
   // dt: the player's (real) frame time; wdt: world time (slow motion scales everything except the player)
   update(dt, player, enemies, inp, camFwd, wdt = dt) {
-    this.t += dt; this.wt = (this.wt || 0) + wdt;
+    this.t += dt; this.wt = (this.wt || 0) + wdt; this.wRate = dt > 1e-8 ? wdt / dt : 1;
     if (!Array.isArray(enemies)) enemies = [enemies];
     this.enemies = enemies; player.isPlayer = true; for (const e of enemies) { e.isPlayer = false; this.brainOf(e); }
     this.player = player; this.pInp = inp; this.camFwd = camFwd;

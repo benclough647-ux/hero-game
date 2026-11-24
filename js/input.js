@@ -24,24 +24,28 @@ export class Input {
     let mx = (k('KeyD') ? 1 : 0) - (k('KeyA') ? 1 : 0) + ax(0);
     let my = (k('KeyW') ? 1 : 0) - (k('KeyS') ? 1 : 0) - ax(1);
     const len = Math.hypot(mx, my); if (len > 1) { mx /= len; my /= len; }
+    const boostKey = (k('ShiftLeft') || k('ShiftRight')) ? 1 : 0;
+    const descendKey = (k('KeyC') || k('ControlLeft')) ? 1 : 0;
     const s = {
       moveX: mx, moveY: my,
       lookX: this.mouseDX * 0.0025 + ax(2) * 3.2 * dt,
       lookY: this.mouseDY * 0.0025 + ax(3) * 2.4 * dt,
-      rsX: gp ? (gp.axes[2] || 0) : 0, // raw right-stick X (locked on: flick left / right = dodge)
+      rsX: gp ? (gp.axes[2] || 0) : 0, // raw right-stick X (flick left / right = switch hero)
       rsY: gp ? (gp.axes[3] || 0) : 0, // raw right-stick Y (locked on: flick up / down = switch villain)
       swX: (k('BracketRight') ? 1 : 0) - (k('BracketLeft') ? 1 : 0), // keyboard [ / ]: switch villain
       dodgeL: (k('ShiftLeft') || k('ShiftRight')) && k('KeyA'), dodgeR: (k('ShiftLeft') || k('ShiftRight')) && k('KeyD'), // keyboard dodge (locked on)
       jump: k('Space') || b(0),
-      boost: Math.max(k('ShiftLeft') || k('ShiftRight') ? 1 : 0, b(5) ? 1 : 0),
-      descend: Math.max(k('KeyC') || k('ControlLeft') ? 1 : 0, b(4) ? 1 : 0),
+      boostKey, descendKey,
+      lb: b(4), rb: b(5), // bumpers: tap while locked on = dodge L / R; hold (and always when not locked on) = descend / boost
+      boost: Math.max(boostKey, b(5) ? 1 : 0),
+      descend: Math.max(descendKey, b(4) ? 1 : 0),
       blast: k('KeyF') || bv(7) > 0.5 || (this.mouseBtn.has(0) && !!document.pointerLockElement),
       tackle: k('KeyR') || bv(6) > 0.5 || (this.mouseBtn.has(2) && !!document.pointerLockElement),
       punch: k('KeyX') || k('KeyV') || b(2),
       super: k('KeyB') || b(10), // LS click: sonic boom / super speed while flying
       lock: k('KeyT') || b(11) || this.mouseBtn.has(1), // RS click / T / middle mouse: lock on
       cancel: k('KeyE') || b(1),
-      swap: k('Tab') || k('KeyQ') || b(14) || b(15), // D-pad left / right: switch hero
+      swap: k('Tab') || k('KeyQ') || b(14) || b(15), // D-pad left / right (and a right-stick flick, applied in combat.prepareInput): switch hero
       y: k('KeyZ') || b(3), // Y: slow motion toggle (while grabbed: counter)
       any: b(0) || b(9),
       hud: k('KeyH') || b(8),
@@ -49,7 +53,7 @@ export class Input {
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'swap', 'y', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock', 'dodgeL', 'dodgeR']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'swap', 'y', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock', 'dodgeL', 'dodgeR', 'lb', 'rb']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }
