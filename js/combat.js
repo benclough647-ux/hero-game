@@ -21,7 +21,7 @@ export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 }; // (now t
 // flying ram (Ben): fly into a villain at full flight speed (>= minSpeed) without pressing grab: impact boom, and they're
 // carried ahead of your chest along your flight (no hand grip) until you slow down (< stopK x the impact speed), turn
 // more than ~turnDeg away, hit something (wall smash) or maxT runs out; then they're flung on along the carry
-export const RAM = { minSpeed: 80, r: 2.4, stopK: 0.45, turnDot: 0.64, maxT: 1.5, minT: 0.1 };
+export const RAM = { minSpeed: 80, aheadDot: 0.5, closeSpeed: 40, r: 2.4, stopK: 0.45, turnDot: 0.64, maxT: 1.5, minT: 0.1 };
 export const DODGE = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.6, dist: 7, dur: 0.15, iframes: 0.3, slowT: 1.75, bonus: 1.2 };
 // choke grab, A: super-fast face-first slam into the ground. Lift `lift` m, then dive at base speed accelerating at `accel`
 // (impact speed = sqrt(base^2 + 2*accel*height) + carried speed); crater / dust / damage scale with that momentum.
@@ -523,7 +523,11 @@ export class Combat {
       if (v.ko || v.grabbedBy || v.slammedBy || v.invulnT > 0 || v.legGrabbing) continue;
       const cb = this.chest(v, t2), c1 = this.chest(P, t1), rel = t3.copy(P.vel).sub(v.vel).multiplyScalar(dt), L = rel.length(), c0 = t4.copy(c1).sub(rel);
       let d; if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
-      if (d < RAM.r) { this.startRam(P, v, sp); return; }
+      if (d >= RAM.r) continue;
+      // only a ram when YOU fly into them: they're ahead along your flight and you're closing fast (not a villain catching you from behind)
+      const to = t4.copy(cb).sub(this.chest(P, t1)).add(rel); const tl = to.length(); if (tl > 1e-3) { to.divideScalar(tl);
+        if (to.dot(P.vel) / sp < RAM.aheadDot || t3.copy(P.vel).sub(v.vel).dot(to) < RAM.closeSpeed) continue; }
+      this.startRam(P, v, sp); return;
     }
   }
   startRam(P, v, sp) {
@@ -611,7 +615,7 @@ export class Combat {
         const dir = isP ? this.camFwd.clone() : this.aiDriveDir(a);
         if (dir.y < -0.3) dir.y = -0.3; dir.normalize();
         act.mode = 'drive'; act.carryDir = dir; a.aim.copy(dir); act.carrySpeed = a.mv.tackleSpeed * 1.25; act.grabT = 0;
-        a.impactBoom?.(dir); this.stats.hits.push({ t: this.t, kind: 'driveBoom', amount: 0, attacker: a.key }); // tackle out of the grab: sonic / flame boom
+        if (a.isPlayer) { a.impactBoom?.(dir); this.stats.hits.push({ t: this.t, kind: 'driveBoom', amount: 0, attacker: a.key }); } // your tackle out of the grab: sonic / flame boom (Ben t100u; villains' drives stay as they were)
         a.vel.copy(dir).multiplyScalar(act.carrySpeed * 0.6);
         this.fx.shockwaveOriented?.(this.chest(a, V()).addScaledVector(dir, -0.6), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 14, 0.45, 0.7);
         if (a.def.style === 'fire') a.fireBurst(a.pos, 60, 16); else this.burst(this.chest(a, V()), a, 30, 10);
