@@ -63,6 +63,19 @@ export class HUD {
     k = Math.round(THREE_clamp(k, 0, 1) * 100) / 100; if (k === this.smK) return; this.smK = k;
     this.smEl.style.display = k > 0 ? 'block' : 'none'; this.smEl.style.opacity = k.toFixed(2);
   }
+  // faint yellow damage telegraph (Ben): a soft screen-edge tint toward the attacking villain. CSS overlay so it
+  // works with the Xbox-safe profile (no post-processing). Keep it low-opacity and small — not a full-screen flash.
+  telegraph(st) {
+    if (!this.tgEl) { const d = document.createElement('div'); d.id = 'atkWarn';
+      d.style.cssText = 'position:fixed;inset:0;pointer-events:none;opacity:0;display:none;z-index:4';
+      const cv = document.querySelector('canvas'); document.body.insertBefore(d, cv ? cv.nextSibling : document.body.firstChild); this.tgEl = d; this.tgSig = ''; }
+    if (!st || !st.on) { if (this.tgSig !== 'off') { this.tgEl.style.display = 'none'; this.tgEl.style.opacity = '0'; this.tgSig = 'off'; } return; }
+    const px = (50 + st.sx * 42).toFixed(1), py = (50 - st.sy * 42).toFixed(1);
+    const sig = `${st.on}|${px}|${py}|${st.k.toFixed(2)}`;
+    if (sig === this.tgSig) return; this.tgSig = sig;
+    this.tgEl.style.background = `radial-gradient(ellipse 70% 70% at ${px}% ${py}%, rgba(255,220,90,0) 40%, rgba(255,205,60,${(0.28 * st.k).toFixed(3)}) 100%)`;
+    this.tgEl.style.display = 'block'; this.tgEl.style.opacity = (0.9).toFixed(2);
+  }
   say(msg) { this.toast.textContent = msg; this.toast.style.opacity = 1; this.toastT = 2; }
   update(h, pad, dt, extra = '') {
     if ((this.toastT -= dt) < 0 && this.toast.style.opacity !== '0') this.toast.style.opacity = 0;

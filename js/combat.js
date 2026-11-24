@@ -29,6 +29,19 @@ export const SLAM = { windup: 0.12, lift: 3, base: 120, accel: 2600, maxSpeed: 5
 // villain coordination: only one villain may be grabbing / tackling / leg-grabbing at a time; attacks staggered by `gap` s;
 // the 'lead' role (rushes in) swaps every lead0..lead1 s while the other circles wider
 export const VILLAIN_AI = { gap: 0.4, lead0: 4, lead1: 7, supportDist: 24, sep: 7 };
+// villain attack mix (Ben): when they choose an attack, 25% choke-grab, 50% punch, 25% body-tackle.
+// every villain attack telegraphs for `telegraph` s of world time (faint yellow warning) before the hit lands.
+// punch lunge (villain only): much longer/faster than the player's DASH, and strong homing to the player's current position.
+export const VILLAIN_ATK = {
+  grab: 0.25, punch: 0.50, tackle: 0.25, telegraph: 1.2,
+  punchSpeed: 400, punchMax: 140, punchTurn: 32, punchRange: 32, punchMin: 6,
+  grabRange: 22, grabMin: 3, tackleRange: 48, tackleMin: 6,
+};
+export function chooseVillainAttack(r = Math.random()) {
+  if (r < VILLAIN_ATK.grab) return 'grab';
+  if (r < VILLAIN_ATK.grab + VILLAIN_ATK.punch) return 'punch';
+  return 'tackle';
+}
 // punch dash: very fast lunge over a short distance, then the strike lands
 // tackle homing (the lunge that turns into the choke grab): locked = strong steering, unlocked = aim-assist steering when the
 // rival is roughly in front; both lead a moving target. Player catch radius is larger than the AI's (swept test, metres).
@@ -86,6 +99,26 @@ class AIBrain {
   constructor(i = 0) { this.i = i; this.t = 0; this.strafe = i ? -1 : 1; this.strafeT = 0; this.think = 0.2 * i; this.mode = 'approach'; this.wantFly = false; this.flyHold = 0; this.legCd = 4 + 3 * i; this.dodgeT = -9; }
 }
 
+// soft yellow sprite used as a faint glow on a telegraphing villain (MeshBasic / additive: works with post-processing off)
+function makeWarnGlow() {
+  const c = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+  let map = null;
+  if (c) {
+    c.width = c.height = 64; const g = c.getContext('2d', { willReadFrequently: true });
+    const grd = g.createRadialGradient(32, 32, 1, 32, 32, 32);
+    // a soft gold ring (clear in the middle) so the warning reads as a halo around the villain, not a wash on the white suit
+    grd.addColorStop(0, 'rgba(255, 220, 80, 0)');
+    grd.addColorStop(0.42, 'rgba(255, 220, 80, 0)');
+    grd.addColorStop(0.58, 'rgba(255, 210, 70, 0.85)');
+    grd.addColorStop(0.78, 'rgba(255, 190, 50, 0.35)');
+    grd.addColorStop(1, 'rgba(255, 180, 40, 0)');
+    g.fillStyle = grd; g.fillRect(0, 0, 64, 64);
+    map = new THREE.CanvasTexture(c); map.needsUpdate = true;
+  }
+  const mat = new THREE.SpriteMaterial({ map, color: 0xffe078, transparent: true, opacity: 0.45, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending, fog: false, toneMapped: false });
+  const s = new THREE.Sprite(mat); s.scale.set(4.6, 5.6, 1); s.visible = false; s.frustumCulled = false; s.renderOrder = 8; return s;
+}
+
 const ROAR_VS = `uniform float r0, r1, len, t; varying float vz; varying vec3 vP; varying vec3 vN; varying vec3 vV;
 void main() {
   vec3 p = position; float z = p.z, a = atan(p.y, p.x);
@@ -140,7 +173,10 @@ export class Combat {
     this.cFire0 = new THREE.Color(6, 3.4, 0.9); this.cFire1 = new THREE.Color(3, 0.35, 0.04);
     this.cGold0 = new THREE.Color(7, 6, 3.5); this.cGold1 = new THREE.Color(2.5, 1.6, 0.4);
     this.lockOn = false; this.lockLostT = 0; this.lockPop = 0; this.reticle = makeReticle(); scene.add(this.reticle);
+    // faint yellow attack telegraph (glow on the villain; HUD draws a soft screen-edge tint). Xbox-safe: no post-processing.
+    this.warnGlow = makeWarnGlow(); scene.add(this.warnGlow); this.warn = null; this.VILLAIN_ATK = VILLAIN_ATK;
   }
+  chooseAttack(r) { return chooseVillainAttack(r); }
 
   // ---------- AI brains (one per villain) ----------
   brainOf(v) {
@@ -263,26 +299,38 @@ export class Combat {
   }
   // target: hero to track during the move (lock-on / aim assist), or null
   start(h, type, aim, target = null) {
-    if (!this.canAct(h) || h.cd[type] > 0) return false;
-    if (type === 'blast' && (h.def.villain || (this.player && h !== this.player))) return false; // eye beam / roar blast are player-only (villains have no beams)
-    h.aim.copy(aim).normalize(); h.action = { type, t: 0, dur: MOVES[type].dur, done: false, target };
-    h.cd[type] = MOVES[type].cd;
-    if (type === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
-    if (type === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.mv.tackleSpeed * 1.25;
+    const kind = type === 'grab' ? 'grab' : type;
+    const move = type === 'grab' ? 'tackle' : type;
+    if (!this.canAct(h) || (h.cd[move] ?? 0) > 0) return false;
+    if (move === 'blast' && (h.def.villain || (this.player && h !== this.player))) return false; // eye beam / roar blast are player-only (villains have no beams)
+    h.aim.copy(aim).normalize(); h.action = { type: move, kind, t: 0, dur: MOVES[move].dur, done: false, target };
+    h.cd[move] = MOVES[move].cd;
+    if (move === 'blast' && (h.def.style === 'clean' || h.def.style === 'fire')) { Object.assign(h.action, { beam: true, dur: 99, onT: 0, hitT: 0, dmgAcc: 0 }); h.cd.blast = 0; }
+    const villainAtk = h !== this.player && !!h.def.villain && (kind === 'punch' || kind === 'grab' || kind === 'tackle');
+    if (villainAtk) {
+      // 1.2 s world-time wind-up: warning on now, the lunge / charge starts later so the hit lands at impactAt
+      const act = h.action; act.warn = true; act.telegraph = VILLAIN_ATK.telegraph; act.telegraphDur = VILLAIN_ATK.telegraph;
+      act.impactAt = this.wt + VILLAIN_ATK.telegraph; act.dur = VILLAIN_ATK.telegraph + MOVES[move].dur; act.pending = kind === 'punch' ? 'dash' : 'launch'; act.swingT = 0;
+      return true;
+    }
+    if (move === 'tackle') { h.action.carryDir = h.aim.clone(); h.action.carrySpeed = h.mv.tackleSpeed * 1.25;
       h.vel.copy(h.aim).multiplyScalar(Math.max(h.vel.dot(h.aim), h.mv.tackleSpeed * (h === this.player ? PLAYER_GRAB.launch * PLAYER_GRAB.speed : 0.6))); // explosive launch (the player's is harder)
       if (h.def.style === 'fire') h.fireBurst(h.pos, 70, 20); else this.fx.shockwave(h.pos.clone().setY(Math.max(h.pos.y, 0)), 0xe8e2d0, 18); this.shakeNear(h.pos, 0.25); }
-    if (type === 'punch') this.startDash(h, target);
+    if (move === 'punch') this.startDash(h, target);
     return true;
   }
+  // villain punches use a much bigger, faster lunge than the player (player DASH is unchanged)
+  dashParams(h) { return h === this.player || !h?.def?.villain ? DASH : { ...DASH, speed: VILLAIN_ATK.punchSpeed, max: VILLAIN_ATK.punchMax, softTurn: VILLAIN_ATK.punchTurn }; }
   // punch lunge: dash at very high speed toward the target (stop just short of it) or a short way forward
   startDash(h, target) {
-    let dist = DASH.free;
-    if (target) { const to = this.chest(target, t1).sub(this.chest(h, t2)); const d = to.length(); h.aim.copy(to.divideScalar(d || 1)); dist = clamp(d - DASH.stop, 0, DASH.max); }
+    const D = this.dashParams(h);
+    let dist = D.free;
+    if (target) { const to = this.chest(target, t1).sub(this.chest(h, t2)); const d = to.length(); h.aim.copy(to.divideScalar(d || 1)); dist = clamp(d - D.stop, 0, D.max); }
     else if (h.state === 'ground') { h.aim.y = 0; if (h.aim.lengthSq() < 1e-4) h.aim.set(Math.sin(h.yaw), 0, Math.cos(h.yaw)); h.aim.normalize(); }
     if (dist < 0.8) { h.vel.addScaledVector(h.aim, 10); return; } // already in reach: plain punch
     const act = h.action;
-    act.dash = { left: dist, t: 0, speed: DASH.speed, cap: DASH.speed, used: 0, trav: 0, skip: true, pre: Math.max(0, h.vel.dot(h.aim)) }; act.dashed = true; act.dashPre = act.dash.pre;
-    act.lunge = !!target && dist > DASH.superMin; // Superman pose + heavy impact
+    act.dash = { left: dist, t: 0, speed: D.speed, cap: D.speed, used: 0, trav: 0, skip: true, pre: Math.max(0, h.vel.dot(h.aim)) }; act.dashed = true; act.dashPre = act.dash.pre;
+    act.lunge = !!target && dist > D.superMin; // Superman pose + heavy impact
     const fire = h.def.style === 'fire', c = this.chest(h, V());
     this.fx.shockwaveOriented?.(c.clone().addScaledVector(h.aim, -0.5), h.aim, fire ? 0xff8a30 : 0xe8f0ff, 7, 0.35, 0.7);
     this.burst(c.clone().addScaledVector(h.aim, 1.2), h, 10, 6);
@@ -291,25 +339,81 @@ export class Combat {
   }
   // per frame while dashing: re-aim at the target, trail effect, end on arrival / distance / wall
   dashStep(dt, a, act) {
+    const D = this.dashParams(a);
     const ds = act.dash; ds.t += dt;
-    const tgt = act.target && !act.target.ko ? act.target : null;
+    const tgt = act.target && !act.target.ko && !act.dodged ? act.target : null;
     if (ds.skip) ds.skip = false; else { const st = a.vel.length() * dt; ds.left -= st; ds.trav += st; } // (the start frame hasn't moved yet)
-    if (tgt) { // home in, leading a moving target; the last step is capped so we arrive exactly at striking distance
+    if (tgt) { // home in; villains snap to the player's current position (strong tracking), the player still leads a moving target
       const to = this.chest(tgt, t1).sub(this.chest(a, t2)); const d = to.length();
-      to.addScaledVector(tgt.vel, clamp(d / DASH.speed, 0, 0.4) * DASH.lead);
-      const dl = to.length(); if (dl > 1e-3) { to.divideScalar(dl); if (act.soft) a.aim.lerp(to, Math.min(1, dt * DASH.softTurn)).normalize(); else a.aim.copy(to); }
-      if (d < DASH.stop + 0.3) ds.left = 0; else { ds.cap = (d - DASH.stop) / dt; ds.left = Math.min(DASH.max - ds.trav, d - DASH.stop); } // range budget (no teleport)
+      if (a === this.player) to.addScaledVector(tgt.vel, clamp(d / D.speed, 0, 0.4) * D.lead);
+      const dl = to.length(); if (dl > 1e-3) { to.divideScalar(dl); if (act.soft && a === this.player) a.aim.lerp(to, Math.min(1, dt * D.softTurn)).normalize(); else a.aim.copy(to); }
+      if (d < D.stop + 0.3) ds.left = 0; else { ds.cap = (d - D.stop) / dt; ds.left = Math.min(D.max - ds.trav, d - D.stop); } // range budget (no teleport)
     } else ds.cap = Math.max(0, ds.left) / dt;
     const fire = a.def.style === 'fire', P = fire ? this.fx.fire : this.fx.spark, c0 = fire ? this.cFire0 : this.cGold0, c1 = fire ? this.cFire1 : this.cGold1;
     const c = this.chest(a, t3);
     for (let i = 0; i < 6; i++) P.emit(t4.copy(c).addScaledVector(a.aim, -0.3 - 0.7 * Math.random()).add(t2.set((Math.random() - .5) * 0.6, (Math.random() - .5) * 0.9, (Math.random() - .5) * 0.6)), t1.copy(a.aim).multiplyScalar(-4 - Math.random() * 6), 0.1 + Math.random() * 0.12, c0, c1);
     const blocked = ds.used > 10 && a.vel.length() < ds.used * 0.4; // hit a wall / the ground
-    if (ds.left <= 0 || ds.t > DASH.maxT || blocked) this.endDash(a, act);
+    if (ds.left <= 0 || ds.t > D.maxT || blocked) this.endDash(a, act);
   }
   endDash(a, act) {
     if (!act.dash) return; act.dash = null;
     const keep = a.state === 'ground' ? 8 : 18; const v = a.vel.length(); if (v > keep) a.vel.multiplyScalar(keep / v);
   }
+  // 1.2 s wind-up: face / home on the player's current position, then launch so the hit lands at impactAt
+  telegraphStep(dt, a, act) {
+    const tgt = !act.dodged && act.target && !act.target.ko ? act.target : null;
+    if (tgt) {
+      const to = this.chest(tgt, t1).sub(this.chest(a, t2)); const d = to.length();
+      if (d > 1e-3) { to.divideScalar(d); a.aim.copy(to); } // snap to current position (no lag)
+    }
+    a.vel.multiplyScalar(Math.exp(-dt * 5));
+    const remain = act.impactAt - this.wt; act.telegraph = Math.max(0, remain);
+    let travel = 0.08;
+    if (act.pending === 'dash') {
+      const D = this.dashParams(a); const d = tgt ? this.chest(tgt, t1).distanceTo(this.chest(a, t2)) : 4;
+      travel = d < D.stop + 0.8 ? MOVES.punch.hitAt : clamp((d - D.stop) / D.speed, 0.04, 0.4);
+    } else if (act.pending === 'launch') {
+      const d = tgt ? this.chest(tgt, t1).distanceTo(this.chest(a, t2)) : 8;
+      const sp = Math.max(a.mv.tackleSpeed * 0.6, 80);
+      travel = clamp((d - TACKLE.catchR) / sp, 0.06, 0.5);
+    }
+    if (remain <= travel + 1e-4) this.releaseTelegraphLaunch(a, act);
+  }
+  releaseTelegraphLaunch(a, act) {
+    const pending = act.pending; act.pending = null; act.telegraph = 0; act.swingT = 0;
+    if (pending === 'dash') this.startDash(a, act.dodged ? null : act.target);
+    else if (pending === 'launch') {
+      act.carryDir = a.aim.clone(); act.carrySpeed = a.mv.tackleSpeed * 1.25;
+      a.vel.copy(a.aim).multiplyScalar(Math.max(a.vel.dot(a.aim), a.mv.tackleSpeed * 0.6));
+      if (a.def.style === 'fire') a.fireBurst(a.pos, 70, 20); else this.fx.shockwave(a.pos.clone().setY(Math.max(a.pos.y, 0)), 0xe8e2d0, 18);
+      this.shakeNear(a.pos, 0.25);
+    }
+  }
+  // which villain (if any) is in the 1.2 s warning window, for the glow + HUD tint
+  warningState(cam) {
+    let who = null;
+    for (const e of this.enemies) {
+      const a = e.action; if (!a || !a.warn || a.done || e.ragdoll || e.ko) continue;
+      if (a.mode && a.mode !== 'drive') continue; // choke hold / follow-through: warning is over
+      if (a.kind === 'punch' && a.swingT > 0.2 && !a.dash) continue;
+      who = e; break;
+    }
+    if (!who) { if (this.warnGlow) this.warnGlow.visible = false; this.warn = null; return { on: false, k: 0, sx: 0, sy: 0, kind: null, left: 0, attacker: null, glow: false }; }
+    const act = who.action, left = Math.max(0, (act.impactAt ?? this.wt) - this.wt);
+    const pulse = 0.42 + 0.10 * Math.sin(this.wt * 7.5);
+    const g = this.warnGlow;
+    if (g) { this.chest(who, g.position); g.position.y += 0.25; g.scale.set(5.0, 6.0, 1); g.material.opacity = pulse; g.visible = true; }
+    let sx = 0, sy = 0, k = 0.55;
+    if (cam) {
+      const p = this.chest(who, t1).clone().project(cam);
+      sx = clamp(p.x, -1.2, 1.2); sy = clamp(p.y, -1.2, 1.2);
+      const off = Math.max(Math.abs(sx), Math.abs(sy));
+      k = off > 1 ? 0.7 : 0.45; // slightly stronger if they're off-screen (so you can tell the side), still faint
+    }
+    this.warn = { on: true, k, sx, sy, kind: act.kind || act.type, left, attacker: who.key, glow: true, opacity: pulse };
+    return this.warn;
+  }
+  clearWarn(h) { if (h?.action) { h.action.warn = false; h.action.telegraph = 0; h.action.pending = null; } if (this.warn?.attacker === h?.key) { if (this.warnGlow) this.warnGlow.visible = false; this.warn = null; } }
 
   damage(target, amount, attacker, kind, extra = {}) {
     if (target.ko) return 0;
@@ -325,7 +429,7 @@ export class Combat {
   knockback(target, dir, speed, up = 0, ragdoll = false, spin = 6) {
     if (target.grabbedBy) this.releaseGrab(target.grabbedBy);
     if (target.legGrabbing) this.releaseLeg(target);
-    target.action = null;
+    this.clearWarn(target); target.action = null;
     const v = t1.copy(dir).setY(dir.y + up).normalize().multiplyScalar(speed / target.def.mass);
     target.vel.copy(v);
     if (ragdoll || target.ko) this.startRagdoll(target, spin);
@@ -333,7 +437,7 @@ export class Combat {
   }
   startRagdoll(h, spin = 6) { h.ragBlend = null;
     if (h.legGrabbing && h.action?.type === 'leggrab') this.releaseLeg(h);
-    h.action = null; h.knockT = 0; h.charge = 0; h.endSprint?.(); h.landT = 0;
+    this.clearWarn(h); h.action = null; h.knockT = 0; h.charge = 0; h.endSprint?.(); h.landT = 0;
     if (h.grabbing) this.releaseGrab(h);
     const q = h.ragdoll ? h.ragdoll.q : new THREE.Quaternion().setFromEuler(h.rig.body.rotation);
     // spin mostly about the axis perpendicular to travel (tumble head over heels)
@@ -438,6 +542,7 @@ export class Combat {
       if (h.slammedBy) this.slamCarry(h.slammedBy, h);
     }
     setWorldSfx(false);
+    this.warningState(this.cam?.cam);
   }
   foeFor(P) {
     const act = P.action;
@@ -452,14 +557,19 @@ export class Combat {
     const act = a.action; if (!act) return;
     if (act.type === 'counter') { if (act.style === 'curl') this.legCounterStep(dt, a, act); else this.counterStep(dt, a, b, act); return; }
     if (act.type === 'leggrab') { if (act.t >= act.dur) { a.action = null; a.legGrabbing = null; } return; }
-    const m = MOVES[act.type];
+    const m = MOVES[act.type] || MOVES.punch;
+    if (act.pending || act.telegraph > 0) { this.telegraphStep(dt, a, act); if (act.pending || act.telegraph > 0) return; }
+    if (act.swingT !== undefined && !act.pending) act.swingT += dt;
     if (act.type === 'blast' && act.beam) { this.eyeBeamStep(dt, a, b, act); return; }
     if (act.type === 'blast' && !act.done && act.t >= m.fireAt) { act.done = true; this.fireBlast(a, b); }
     if (act.dash) this.dashStep(dt, a, act);
-    if (act.type === 'punch' && !act.done && act.t >= (a.vel.length() > 20 || act.dashed ? 0.05 : m.hitAt)) { // active strike window: a fast flyer can't pass through the target
-      if (!act.swung) { act.swung = true; this.burst(this.handPos(a, V()), a, 14, 6); }
-      if (this.tryPunch(a, b)) { act.done = true; this.endDash(a, act); if (act.dash === null) a.vel.multiplyScalar(0.3); }
-      else if (act.t > 0.34) act.done = true;
+    if (act.type === 'punch' && !act.pending && !act.done) { // active strike window: a fast flyer can't pass through the target
+      const pt = act.swingT !== undefined && a !== this.player ? act.swingT : act.t;
+      if (pt >= (a.vel.length() > 20 || act.dashed ? 0.05 : m.hitAt)) {
+        if (!act.swung) { act.swung = true; this.burst(this.handPos(a, V()), a, 14, 6); }
+        if (this.tryPunch(a, b)) { act.done = true; act.warn = false; this.endDash(a, act); if (act.dash === null) a.vel.multiplyScalar(0.3); }
+        else if (pt > 0.34) { act.done = true; act.warn = false; }
+      }
     }
     if (act.type === 'tackle' && act.mode && act.mode !== 'drive') {
       if (a.grabbing) this.chokeStep(dt, a, a.grabbing); else if (act.mode === 'punch' && act.strikeT !== undefined) act.strikeT += dt;
@@ -478,7 +588,7 @@ export class Combat {
     }
     if (act.type === 'tackle') {
       // homing: steer the drive toward a locked target in 3D
-      if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy) {
+      if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy && !act.dodged) {
         // lead the target: aim where it will be when we arrive (capped), so a moving / strafing rival can still be caught
         const tc = this.chest(act.target, t1), ac = this.chest(a, t2), dist = tc.distanceTo(ac);
         const away = a !== this.player && this.fleeing(a, act.target);
@@ -492,7 +602,10 @@ export class Combat {
         const cb = this.chest(v, t2), c1 = this.chest(a, t1), rel = t3.copy(a.vel).sub(v.vel).multiplyScalar(dt), L = rel.length();
         const c0 = t4.copy(c1).sub(rel); let d;
         if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
-        if (d < (a === this.player ? TACKLE.playerCatchR : this.fleeing(a, v) ? PURSUIT.behindCatchR : TACKLE.catchR)) this.grab(a, v);
+        if (d < (a === this.player ? TACKLE.playerCatchR : this.fleeing(a, v) ? PURSUIT.behindCatchR : TACKLE.catchR)) {
+          if (a !== this.player && act.kind === 'tackle') this.bodyTackle(a, v);
+          else this.grab(a, v);
+        }
       }
       if (a.grabbing) {
         act.grabT = (act.grabT || 0) + dt;
@@ -549,11 +662,28 @@ export class Combat {
     this.fx.shockwaveOriented?.(this.chest(v, V()), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 12, 0.5, 0.6);
     this.stats.hits.push({ t: this.t, kind: 'ramRelease', amount: 0, why, target: v.key, attacker: a.key });
   }
+  // body tackle (villain 'tackle' pick): a charge that knocks them along the flight, no choke hold (that's 'grab')
+  bodyTackle(a, b) {
+    const act = a.action; if (!act || b.slammedBy) return;
+    if (b.invulnT > 0 || (b.dodgeUntil > this.t && b.invulnT > 0)) {
+      if (!act.dodgeLogged) { act.dodgeLogged = true; this.stats.hits.push({ t: this.t, kind: 'dodged', amount: 0, target: b.key, attacker: a.key }); }
+      act.dodged = true; act.target = null; act.warn = false; return;
+    }
+    const rel = t1.copy(a.vel).sub(b.vel).length();
+    act.warn = false; act.done = true;
+    this.damage(b, 8 + 0.1 * rel, a, 'tackle', { speed: rel, body: true });
+    const dir = a.aim.clone(); if (Math.abs(dir.y) < 0.12) { dir.y = 0; dir.normalize(); }
+    this.knockback(b, dir, 90 + 0.45 * rel, 0.08, true, 11);
+    const hp = this.chest(b, V());
+    this.fx.shockwaveOriented?.(hp, dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 16, 0.5, 0.7);
+    this.burst(hp, a, 40, 12); this.shakeNear(hp, 0.4 + rel / 400);
+    this.clearWarn(a); a.vel.multiplyScalar(0.45); a.action = null;
+  }
   grab(a, b) {
     if (b.invulnT > 0 || b.slammedBy) return;
     const rel = t1.copy(a.vel).sub(b.vel).length();
-    a.grabbing = b; b.grabbedBy = a; b.action = null; b.knockT = 0; b.state = 'air';
-    const act = a.action; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
+    a.grabbing = b; b.grabbedBy = a; this.clearWarn(b); b.action = null; b.knockT = 0; b.state = 'air';
+    const act = a.action; act.warn = false; act.grabT = 0; act.carryDir = a.aim.clone(); if (act.carryDir.y < -0.3) act.carryDir.y = -0.3; act.carryDir.normalize();
     act.carrySpeed = Math.max(a.mv.tackleSpeed * 1.25, a.vel.length() * 1.15);
     this.damage(b, 4 + 0.1 * rel, a, 'tackle', { speed: rel });
     // the tackle ends in a one-handed choke hold: the attacker brakes hard and hangs the victim at arm's length
@@ -1271,12 +1401,23 @@ export class Combat {
     if (P && (P.grabbedBy || P.legGrabbedBy || P.slammedBy)) return true;
     return this.enemies.some(e => e !== ai && (e.grabbing || e.legGrabbing || e.action?.type === 'tackle' || e.action?.type === 'leggrab'));
   }
-  canStartAttack(ai) { return this.wt - this.coord.lastAtk >= VILLAIN_AI.gap; }
+  canStartAttack(ai) {
+    if (this.wt - this.coord.lastAtk < VILLAIN_AI.gap) return false;
+    // don't overlap 1.2 s telegraphs / lunges (the indicator should be readable as one attack)
+    for (const e of this.enemies) {
+      if (e === ai || e.ko) continue;
+      const a = e.action; if (!a) continue;
+      if (a.warn || a.pending || a.telegraph > 0) return false;
+      if (a.type === 'punch' && !a.done) return false;
+      if (a.type === 'tackle' && !e.grabbing && !a.mode) return false;
+    }
+    return true;
+  }
   aiStart(ai, type, dir) {
     if (!this.canStartAttack(ai)) return false;
-    if (type === 'tackle' && this.grabBusy(ai)) return false;
-    const ok = this.start(ai, type, dir);
-    if (ok) { this.coord.lastAtk = this.wt; this.coord.starts.push({ t: +this.t.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
+    if ((type === 'tackle' || type === 'grab') && this.grabBusy(ai)) return false;
+    const ok = this.start(ai, type, dir, this.player); // always home on the player
+    if (ok) { this.coord.lastAtk = this.wt; this.coord.starts.push({ t: +this.t.toFixed(3), wt: +this.wt.toFixed(3), key: ai.key, type }); if (this.coord.starts.length > 80) this.coord.starts.shift(); }
     return ok;
   }
   // the target is flying / running away from `a` (its velocity points away from a): used for the pursuit tweaks (PURSUIT)
@@ -1296,6 +1437,13 @@ export class Combat {
     const c = ai.aiCam;
     if (ai.grabbing || ai.legGrabbing) { c.yawFacing = ai.yaw; return inp; } // holding someone: the choke / swing logic decides
     if (ai.ko || ai.ragdoll || ai.grabbedBy || ai.legGrabbedBy || this.aiOff) return inp;
+    if (ai.action && (ai.action.pending || ai.action.telegraph > 0 || (ai.action.warn && !ai.action.mode))) {
+      // wind-up: face the player, hold still so the 1.2 s warning is readable
+      const me0 = this.chest(ai, t1), tgt0 = this.chest(player, t2), to0 = tgt0.sub(me0); const d0 = to0.length() || 1; to0.divideScalar(d0);
+      if (!ai.action.dodged) ai.aim.copy(to0);
+      const flat0 = V(ai.aim.x, 0, ai.aim.z); if (flat0.lengthSq() > 1e-6) { flat0.normalize(); c.flatForward.copy(flat0); c.right.set(-flat0.z, 0, flat0.x); c.yawFacing = Math.atan2(flat0.x, flat0.z); c.forward.copy(ai.aim); }
+      return inp;
+    }
     const me = this.chest(ai, V()), tgt = this.chest(player, V());
     const to = tgt.clone().sub(me); const d = to.length(); const dir = to.clone().divideScalar(d || 1);
     // pursuit: the player is getting away -> cruise bonus (ramped, not while they super-speed) + steer at the intercept point
@@ -1354,14 +1502,17 @@ export class Combat {
       }
     }
     if (B.think <= 0 && this.canAct(ai) && !player.ragdoll && !(busy && !lead)) {
-      B.think = 0.35 + Math.random() * 0.5;
-      const r = Math.random();
-      if (d < (lead ? 9 : 4.2) && ai.cd.punch <= 0 && !player.grabbedBy && !player.legGrabbedBy) { if (this.aiStart(ai, 'punch', dir)) B.mode = 'circle'; } // (dash punch closes up to 14 m)
-      else if (d < 45 && d > 6 && ai.cd.tackle <= 0 && r < (lead ? (flee ? PURSUIT.tackleChance : 0.22) : 0.1)) this.aiStart(ai, 'tackle', dir);
-      // (no ranged blast / beams / roar: villains only move, fly, punch and grab)
-      else if (r > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
+      B.think = 0.28 + Math.random() * 0.4;
+      const type = this.chooseAttack();
+      const range = type === 'punch' ? VILLAIN_ATK.punchRange : type === 'grab' ? VILLAIN_ATK.grabRange : VILLAIN_ATK.tackleRange;
+      const minR = type === 'punch' ? VILLAIN_ATK.punchMin : type === 'grab' ? VILLAIN_ATK.grabMin : VILLAIN_ATK.tackleMin;
+      const cdOk = type === 'punch' ? ai.cd.punch <= 0 : ai.cd.tackle <= 0;
+      const pBusy = player.grabbedBy || player.legGrabbedBy;
+      if (cdOk && !pBusy && d <= range && d >= minR * 0.25) {
+        if (this.aiStart(ai, type, dir)) B.mode = 'circle';
+      } else if (Math.random() > 0.82) B.mode = B.mode === 'rush' ? 'circle' : 'rush';
+      // (no ranged blast / beams / roar: villains only move, fly, punch, grab and tackle)
     }
-    if (B.mode === 'rush' && lead && d < 3.5 && ai.cd.punch <= 0 && this.canAct(ai) && !player.ragdoll && !player.grabbedBy && !player.legGrabbedBy) { if (this.aiStart(ai, 'punch', dir)) B.mode = 'circle'; }
     return inp;
   }
 
@@ -1373,7 +1524,7 @@ export class Combat {
   }
   reset(h, p) {
     if (h.legGrabbing) this.releaseLeg(h); if (h.legGrabbedBy) this.releaseLeg(h.legGrabbedBy);
-    h.endSuper?.(); h.endSprint?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; h.action = null; h.knockT = 0; h.landT = 0; h.legAlpha = undefined;
+    h.endSuper?.(); h.endSprint?.(); h.ko = false; h.hp = h.maxHp; h.ragdoll = null; h.grabbedBy = null; h.grabbing = null; this.clearWarn(h); h.action = null; h.knockT = 0; h.landT = 0; h.legAlpha = undefined;
     if (p) h.pos.copy(p); h.vel.set(0, 0, 0); h.rig.body.rotation.set(0, 0, 0); h.state = h.pos.y > 0.5 ? 'air' : 'ground';
   }
   inCombat(player, enemies) {

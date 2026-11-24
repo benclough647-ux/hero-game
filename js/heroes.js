@@ -836,9 +836,9 @@ export class Hero {
       else if (act && act.beam) { over = null; } // eye beam: locomotion/flight base + additive upper-body clip
       else if (act && has(act.type)) {
         over = act.type; overW = 1;
-        if (act.type === 'punch') drive('punch', act.t * 1.6);       // fist lands ~0.16 s (game hit window)
+        if (act.type === 'punch') drive('punch', (act.pending || act.telegraph > 0) ? 0.04 : (act.swingT !== undefined && this.isPlayer !== true ? act.swingT : act.t) * 1.6);       // fist lands ~0.16 s (game hit window); villains hold a wind-up during the 1.2 s telegraph
         else if (act.type === 'blast') drive('blast', act.t);           // hand up by ~0.12 s, blast fires at 0.14 s
-        else if (act.type === 'tackle') { if (act.t < dt * 1.5) acts.tackle.time = 0; acts.tackle.timeScale = this.isPlayer === true ? 1.8 : 1; } // player: snappier reach
+        else if (act.type === 'tackle') { if (act.pending || act.telegraph > 0) { drive('tackle', 0.02); acts.tackle.timeScale = 0; } else { if (act.t < dt * 1.5) acts.tackle.time = 0; acts.tackle.timeScale = this.isPlayer === true ? 1.8 : 1; } } // player: snappier reach
       } else if (this.knockT > 0 && has('hit')) { over = 'hit'; overW = 1; drive('hit', (0.45 - this.knockT) / 0.45 * acts.hit.getClip().duration); }
       if (over) { for (const n in tgt) tgt[n] *= 1 - overW; tgt[over] = overW; }
     }
@@ -1142,7 +1142,7 @@ export class Hero {
       if (this.state !== 'fly') this.state = 'fly';
       this.vel.multiplyScalar(Math.exp(-dt * 7));
       const fl = city.heightAt(this.pos.x, this.pos.z, 0.5); if (this.pos.y < fl + 1.0) this.vel.y = Math.max(this.vel.y, (fl + 1.0 - this.pos.y) * 4);
-    } else if (act && act.type === 'tackle' && !act.ram && !stun) { // (a flying ram: you keep flying it yourself)
+    } else if (act && act.type === 'tackle' && !act.ram && !act.pending && !(act.telegraph > 0) && !stun) { // (a flying ram: you keep flying it yourself) // (wind-up: hold still)
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
       const pg = this.isPlayer === true && !this.grabbing, spd = this.grabbing ? act.carrySpeed : d.tackleSpeed * (pg ? PLAYER_GRAB.speed : 1);
       const dir = this.grabbing ? act.carryDir : this.aim;
@@ -1295,7 +1295,7 @@ export class Hero {
       if (this.slamLean) r.body.rotation.x += this.slamLean; // ...by the attacker diving over them
       r.body.rotation.y = 0;
       // Superman punch lunge: stretch out along the dash (pitch the body toward the aim), eased in/out
-      const lng = act && act.type === 'punch' && act.lunge && !act.done ? 1 : 0;
+      const lng = act && act.type === 'punch' && act.lunge && !act.done && !act.pending && !(act.telegraph > 0) ? 1 : 0;
       this.lungeW = (this.lungeW || 0) + (lng - (this.lungeW || 0)) * Math.min(1, dt * (lng ? 14 : 7));
       if (this.lungeW > 0.001) { const lp = THREE.MathUtils.clamp(Math.acos(THREE.MathUtils.clamp(this.aim.y, -1, 1)), 0.3, this.state === 'ground' ? 1.2 : 1.5);
         r.body.rotation.x += (lp - r.body.rotation.x) * this.lungeW; r.body.rotation.z *= 1 - this.lungeW; }

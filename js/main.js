@@ -217,6 +217,7 @@ function combatFrame(dt, inp) {
   hud.grab(combat.grabState(P, villains), input.state.hasPad, P.def.style === 'fire');
   const G = villains.find(v => v.grabbing === P || v.legGrabbing === P);
   hud.counter(!!G && combat.canCounter(P), G || villains[0], camera, dt); // Y prompt over the grabber's head, only while they hold you (choke or leg grab: 1.5 s)
+  hud.telegraph(combat.warningState(camera)); // faint yellow 1.2 s wind-up (CSS + sprite; works with post-processing off)
 }
 const clock = new THREE.Clock();
 let paused = false;
