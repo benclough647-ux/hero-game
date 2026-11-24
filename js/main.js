@@ -165,7 +165,7 @@ preloadHeroModels((p, url) => {
   markReady(true);
 });
 
-// D-pad left / right, or a right-stick left / right flick, swaps heroes: you become the other hero in the same spot (same state / health); the villains stay the enemies
+// D-pad left / right swaps heroes: you become the other hero in the same spot (same state / health); the villains stay the enemies
 function switchHero() {
   const a = heroes[idx], b = heroes[idx ^ 1];
   if (a.grabbing) combat.releaseGrab(a); if (a.legGrabbing) combat.releaseLeg(a);
@@ -197,9 +197,9 @@ function stepSlowmo(dt) { // ease the world clock in log space so 1 -> 0.1 feels
   setWorldRate(slow.rate); hud.slowmo((1 - slow.rate) / (1 - SLOWMO.rate));
 }
 function combatFrame(dt, inp) {
-  combat.prepareInput(dt, inp); // bumper tap vs hold; right-stick flick may set swapPressed
+  combat.prepareInput(dt, inp); // bumper tap vs hold
   const cur = heroes[idx];
-  if (inp?.swapPressed && !cur.grabbedBy && !cur.legGrabbedBy && !cur.slammedBy && cur.action?.type !== 'counter') switchHero(); // D-pad left / right, or a right-stick flick
+  if (inp?.swapPressed && !cur.grabbedBy && !cur.legGrabbedBy && !cur.slammedBy && cur.action?.type !== 'counter') switchHero(); // D-pad left / right
   const P = heroes[idx];
   if (canToggleSlowmo(P, dt) && inp?.yPressed) { if (slow.byDodge) slow.byDodge = false; else setSlowmo(!slow.on); } // Y during a dodge window: keep the slow motion on // (grabbed: combat.update turns Y into the counter)
   stepSlowmo(dt); const wdt = dt * slow.rate; // world time

@@ -30,8 +30,8 @@ export class Input {
       moveX: mx, moveY: my,
       lookX: this.mouseDX * 0.0025 + ax(2) * 3.2 * dt,
       lookY: this.mouseDY * 0.0025 + ax(3) * 2.4 * dt,
-      rsX: gp ? (gp.axes[2] || 0) : 0, // raw right-stick X (flick left / right = switch hero)
-      rsY: gp ? (gp.axes[3] || 0) : 0, // raw right-stick Y (locked on: flick up / down = switch villain)
+      rsX: gp ? (gp.axes[2] || 0) : 0, // raw right-stick X (locked on: flick left / right = switch villain)
+      rsY: gp ? (gp.axes[3] || 0) : 0, // raw right-stick Y (camera pitch)
       swX: (k('BracketRight') ? 1 : 0) - (k('BracketLeft') ? 1 : 0), // keyboard [ / ]: switch villain
       dodgeL: (k('ShiftLeft') || k('ShiftRight')) && k('KeyA'), dodgeR: (k('ShiftLeft') || k('ShiftRight')) && k('KeyD'), // keyboard dodge (locked on)
       jump: k('Space') || b(0),
@@ -45,7 +45,7 @@ export class Input {
       super: k('KeyB') || b(10), // LS click: sonic boom / super speed while flying
       lock: k('KeyT') || b(11) || this.mouseBtn.has(1), // RS click / T / middle mouse: lock on
       cancel: k('KeyE') || b(1),
-      swap: k('Tab') || k('KeyQ') || b(14) || b(15), // D-pad left / right (and a right-stick flick, applied in combat.prepareInput): switch hero
+      swap: k('Tab') || k('KeyQ') || b(14) || b(15), // D-pad left / right: switch hero
       y: k('KeyZ') || b(3), // Y: slow motion toggle (while grabbed: counter)
       any: b(0) || b(9),
       hud: k('KeyH') || b(8),

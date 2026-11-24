@@ -11,12 +11,10 @@ const t1 = V(), t2 = V(), t3 = V(), t4 = V(), t5 = V();
 const clamp = THREE.MathUtils.clamp;
 // lock-on: range to acquire, distance / KO time that breaks it
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
-// lock switching: flick the right stick UP / DOWN (raw axis) while locked on (keyboard [ / ]). The stick must return inside
-// `dead` before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
+// lock switching: flick the right stick LEFT / RIGHT (raw axis) while locked on (keyboard [ / ]). The stick must return
+// inside `dead` before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
+// Up / down on the stick is camera pitch, as it was before the dodge (not a second target-switch).
 export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 };
-// right-stick LEFT / RIGHT flick (from near-centre past `flick` within `window` s) swaps hero, with a cooldown; D-pad left /
-// right still swaps too. A slow camera look is not a flick.
-export const HEROFLICK = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.4 };
 // lock-on dodge (Ben): tap LB / RB (keyboard Shift+A / D) while locked on for a very fast sidestep around the target
 // (`dist` m in `dur` s) with i-frames (`iframes` s: punches and grabs miss, villain tackles in flight lose their homing),
 // a wind (Centurion) / flame (Tiger) burst. World slow motion and the `slowT` s counter window (main.js, hits knock back
@@ -158,7 +156,7 @@ export class Combat {
     this.projectiles = []; this.t = 0; this.wt = 0; this.lastCombat = -99; this.enemies = [];
     this.coord = { lastAtk: -9, lead: 0, leadT: 5, starts: [] }; // villain coordination (see VILLAIN_AI)
     this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null; this.dodgeIn = { cd: 0, n: 0 }; this.counterWin = 0;
-    this.heroFlick = { rt: 0, centreT: 0, armed: true, cd: 0, n: 0 }; this.bump = { lb: false, rb: false, lbT: 0, rbT: 0 }; this.wRate = 1;
+    this.bump = { lb: false, rb: false, lbT: 0, rbT: 0 }; this.wRate = 1;
     this.stats = { hits: [] }; // for automated tests
     // light-ray beam: additive HDR core + soft glow cylinder (bloom picks up the >1 colour)
     const g = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true); g.translate(0, 0.5, 0); g.rotateX(Math.PI / 2);
@@ -228,14 +226,13 @@ export class Combat {
       if (this.lockOn) { this.setLock(false); this.hud?.say('Lock off'); }
       else { const t = this.bestLock(P); if (t) { this.setLock(true, t); this.hud?.say(`Locked on: ${t.def.name}`); } else this.hud?.say('No target in range'); }
     }
-    // right-stick flick LEFT / RIGHT = switch hero (prepareInput); UP / DOWN while locked on = switch villain (keyboard [ / ])
-    const F = this.flick, y = inp?.rsY ?? 0, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
-    if (Math.abs(y) < LOCKSW.dead) F.armed = true;
+    // right-stick flick LEFT / RIGHT to switch target (keyboard [ / ]); up / down is camera pitch
+    const F = this.flick, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
+    if (Math.abs(x) < LOCKSW.dead) F.armed = true;
     const D = this.dodgeIn; D.cd = Math.max(0, D.cd - dt); this.counterWin = Math.max(0, this.counterWin - dt);
-    const ax = Math.abs(x), ay = Math.abs(y);
     if (this.lockOn) {
-      if (inp && ay >= LOCKSW.flick && ay > ax) inp.lookY = 0;
-      if (F.armed && F.cd <= 0 && ay > LOCKSW.flick && ay > ax) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, y < 0 ? 1 : -1); }
+      if (inp && Math.abs(x) >= LOCKSW.dead) inp.lookX = 0; // while locked the stick X is the target switch, not a camera orbit
+      if (F.armed && F.cd <= 0 && Math.abs(x) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(x)); }
       if (inp?.swX && F.cd <= 0 && !F.kbHeld) { F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(inp.swX)); } F.kbHeld = !!inp?.swX;
       if (inp && (inp.dodgeLPressed || inp.dodgeRPressed) && D.cd <= 0) this.startDodge(P, inp.dodgeRPressed ? 1 : -1);
       const E = this.lockTgt, far = P.pos.distanceTo(E.pos) > LOCK.lose;
@@ -248,11 +245,10 @@ export class Combat {
     }
     this.updateReticle(dt, this.lockTgt);
   }
-  // bumper tap / hold (locked on only) + right-stick flick to swap hero. Called once per frame, before the player moves
-  // so a locked-on bumper tap doesn't also apply a sliver of boost / descend.
+  // bumper tap / hold (locked on only). Called once per frame, before the player moves so a locked-on bumper tap
+  // doesn't also apply a sliver of boost / descend.
   prepareInput(dt, inp) {
     if (!inp) return;
-    this.pollHeroFlick(dt, inp);
     const B = this.bump, tap = DODGE.tap;
     if (!this.lockOn) { B.lb = B.rb = false; return; }
     if (inp.lbPressed) { B.lb = true; B.lbT = 0; }
@@ -268,17 +264,6 @@ export class Combat {
       if (inp.rb && B.rbT <= tap + 1e-6) inp.boost = inp.boostKey || 0;
       if (inp.rbReleased) { if (B.rbT <= tap + 1e-6) inp.dodgeRPressed = true; B.rb = false; }
       else if (B.rbT > tap) { if (inp.rb) inp.boost = Math.max(inp.boost || 0, 1); B.rb = false; }
-    }
-  }
-  pollHeroFlick(dt, inp) {
-    const H = this.heroFlick, x = inp.rsX ?? 0, y = inp.rsY ?? 0, ax = Math.abs(x), ay = Math.abs(y);
-    H.rt += dt; H.cd = Math.max(0, H.cd - dt);
-    if (ax < HEROFLICK.centre) { H.centreT = H.rt; H.armed = true; }
-    if (ax > HEROFLICK.flick && H.armed) {
-      H.armed = false;
-      if (H.rt - H.centreT <= HEROFLICK.window + 1e-6 && H.cd <= 0 && ax >= ay) {
-        inp.swapPressed = true; inp.lookX = 0; H.cd = HEROFLICK.cd; H.n++;
-      }
     }
   }
   // an incoming villain punch / grab / body-tackle that would land during the i-frames, or is telegraphed and lands
