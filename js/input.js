@@ -28,7 +28,10 @@ export class Input {
       moveX: mx, moveY: my,
       lookX: this.mouseDX * 0.0025 + ax(2) * 3.2 * dt,
       lookY: this.mouseDY * 0.0025 + ax(3) * 2.4 * dt,
-      rsX: (gp ? (gp.axes[2] || 0) : 0) + (k('BracketRight') ? 1 : 0) - (k('BracketLeft') ? 1 : 0), // raw right-stick X (lock-on target flick)
+      rsX: gp ? (gp.axes[2] || 0) : 0, // raw right-stick X (locked on: flick left / right = dodge)
+      rsY: gp ? (gp.axes[3] || 0) : 0, // raw right-stick Y (locked on: flick up / down = switch villain)
+      swX: (k('BracketRight') ? 1 : 0) - (k('BracketLeft') ? 1 : 0), // keyboard [ / ]: switch villain
+      dodgeL: (k('ShiftLeft') || k('ShiftRight')) && k('KeyA'), dodgeR: (k('ShiftLeft') || k('ShiftRight')) && k('KeyD'), // keyboard dodge (locked on)
       jump: k('Space') || b(0),
       boost: Math.max(k('ShiftLeft') || k('ShiftRight') ? 1 : 0, b(5) ? 1 : 0),
       descend: Math.max(k('KeyC') || k('ControlLeft') ? 1 : 0, b(4) ? 1 : 0),
@@ -46,7 +49,7 @@ export class Input {
       hasPad: !!gp,
     };
     this.mouseDX = this.mouseDY = 0;
-    for (const n of ['jump', 'cancel', 'swap', 'y', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
+    for (const n of ['jump', 'cancel', 'swap', 'y', 'any', 'hud', 'quality', 'blast', 'tackle', 'punch', 'super', 'lock', 'dodgeL', 'dodgeR']) { s[n + 'Pressed'] = s[n] && !this.prev[n]; s[n + 'Released'] = !s[n] && this.prev[n]; }
     this.prev = s; this.state = s; return s;
   }
 }

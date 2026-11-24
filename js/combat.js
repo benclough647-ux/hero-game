@@ -13,7 +13,12 @@ const clamp = THREE.MathUtils.clamp;
 export const LOCK = { range: 520, lose: 800, loseT: 1.0, koT: 1.5 };
 // lock switching: flick the right stick left / right (raw axis) while locked on. The stick must return inside `dead`
 // before the next flick counts, plus a cooldown; the camera eases over to the new target over `ease` s (no jerk).
-export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 };
+export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 }; // (now the stick's UP / DOWN flick: left / right is the dodge)
+// lock-on dodge (Ben): flick the right stick left / right (from near-centre past `flick` within `window` s; keyboard Shift+A / D)
+// while locked on: a very fast sidestep around the target (`dist` m in `dur` s) with i-frames (`iframes` s: punches and grabs
+// miss, villain tackles in flight lose their homing), a wind (Centurion) / flame (Tiger) burst, and world slow motion for a
+// `slowT` s real-time counter window (main.js); hits landed in that window knock back `bonus` x harder.
+export const DODGE = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.6, dist: 7, dur: 0.15, iframes: 0.3, slowT: 1.75, bonus: 1.2 };
 // choke grab, A: super-fast face-first slam into the ground. Lift `lift` m, then dive at base speed accelerating at `accel`
 // (impact speed = sqrt(base^2 + 2*accel*height) + carried speed); crater / dust / damage scale with that momentum.
 export const SLAM = { windup: 0.12, lift: 3, base: 120, accel: 2600, maxSpeed: 520, dmg0: 62, dmgK: 0.09, dmgMax: 110, down: 2.4, dustK: 0.7, angle: 0.18 };
@@ -109,7 +114,7 @@ export class Combat {
     this.scene = scene; this.fx = fx; this.city = city; this.cam = cam; this.hud = hud;
     this.projectiles = []; this.t = 0; this.wt = 0; this.lastCombat = -99; this.enemies = [];
     this.coord = { lastAtk: -9, lead: 0, leadT: 5, starts: [] }; // villain coordination (see VILLAIN_AI)
-    this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null;
+    this.flick = { armed: true, cd: 0, switches: 0 }; this.lockTgt = null; this.dodgeIn = { rt: 0, centreT: 0, armed: true, cd: 0, n: 0 }; this.counterWin = 0;
     this.stats = { hits: [] }; // for automated tests
     // light-ray beam: additive HDR core + soft glow cylinder (bloom picks up the >1 colour)
     const g = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true); g.translate(0, 0.5, 0); g.rotateX(Math.PI / 2);
@@ -176,12 +181,18 @@ export class Combat {
       if (this.lockOn) { this.setLock(false); this.hud?.say('Lock off'); }
       else { const t = this.bestLock(P); if (t) { this.setLock(true, t); this.hud?.say(`Locked on: ${t.def.name}`); } else this.hud?.say('No target in range'); }
     }
-    // right-stick flick to switch target (raw stick X; keyboard [ / ])
-    const F = this.flick, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
-    if (Math.abs(x) < LOCKSW.dead) F.armed = true;
+    // right-stick flick UP / DOWN to switch target (keyboard [ / ]); flick LEFT / RIGHT = dodge
+    const F = this.flick, y = inp?.rsY ?? 0, x = inp?.rsX ?? 0; F.cd = Math.max(0, F.cd - dt);
+    if (Math.abs(y) < LOCKSW.dead) F.armed = true;
+    const D = this.dodgeIn, ax = Math.abs(x); D.rt += dt; D.cd = Math.max(0, D.cd - dt); this.counterWin = Math.max(0, this.counterWin - dt);
+    if (ax < DODGE.centre) { D.centreT = D.rt; D.armed = true; }
     if (this.lockOn) {
-      if (inp && Math.abs(x) >= LOCKSW.dead) inp.lookX = 0; // while locked the stick X is the target switch, not a camera nudge
-      if (F.armed && F.cd <= 0 && Math.abs(x) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(x)); }
+      if (inp && ax >= DODGE.centre) inp.lookX = 0; // while locked the stick X is the dodge, not a camera orbit
+      if (inp && Math.abs(y) >= LOCKSW.flick) inp.lookY = 0;
+      if (F.armed && F.cd <= 0 && Math.abs(y) > LOCKSW.flick) { F.armed = false; F.cd = LOCKSW.cd; this.switchLock(P, y < 0 ? 1 : -1); }
+      if (inp?.swX && F.cd <= 0 && !F.kbHeld) { F.cd = LOCKSW.cd; this.switchLock(P, Math.sign(inp.swX)); } F.kbHeld = !!inp?.swX;
+      if (ax > DODGE.flick && D.armed) { D.armed = false; if (D.rt - D.centreT <= DODGE.window + 1e-6 && D.cd <= 0) this.startDodge(P, Math.sign(x)); } // a slow push isn't a flick
+      if (inp && (inp.dodgeLPressed || inp.dodgeRPressed) && D.cd <= 0) this.startDodge(P, inp.dodgeRPressed ? 1 : -1);
       const E = this.lockTgt, far = P.pos.distanceTo(E.pos) > LOCK.lose;
       if (far || E.ko) this.lockLostT += dt; else this.lockLostT = 0;
       if (this.lockLostT > (E.ko ? LOCK.koT : LOCK.loseT)) {
@@ -191,6 +202,35 @@ export class Combat {
       }
     }
     this.updateReticle(dt, this.lockTgt);
+  }
+  // ---------- lock-on dodge ----------
+  startDodge(P, s) {
+    const E = this.lockTgt;
+    if (!this.lockOn || !E || P.ko || P.ragdoll || P.grabbedBy || P.legGrabbedBy || P.slammedBy || P.grabbing || P.dodge) return false;
+    if (P.action) { if (P.action.type === 'tackle' && P.action.mode) return false; P.action = null; } // (cancels a wind-up / beam)
+    const to = t1.copy(E.pos).sub(P.pos).setY(0); const r = Math.max(2, to.length()); to.normalize();
+    const side = V(-to.z, 0, to.x).multiplyScalar(s); // s = +1: to the player's right (as seen looking at the target)
+    P.dodge = { t: 0, dur: DODGE.dur, s, tgt: E, r, v: side.clone().multiplyScalar(DODGE.dist / DODGE.dur), side };
+    P.vel.copy(P.dodge.v); P.invulnT = Math.max(P.invulnT, DODGE.iframes); P.dodgeUntil = this.t + DODGE.iframes; this.dodgeIn.cd = DODGE.cd; this.dodgeIn.n++;
+    for (const e of this.enemies) { const a = e.action; // grab attempts in progress lose the player: they fly past
+      if (a && a.type === 'tackle' && !e.grabbing && a.target === P) { a.target = null; a.dodged = true; }
+      if (a && a.type === 'punch' && a.target === P) { a.target = null; a.dodged = true; } }
+    const fire = P.def.style === 'fire', c = this.chest(P, V());
+    if (fire) { P.fireBurst?.(P.pos, 45, 16); this.fx.shockwaveOriented?.(c, side.clone().negate(), 0xff8a30, 9, 0.35, 0.7); }
+    else { this.fx.shockwaveOriented?.(c, side.clone().negate(), 0xe8f0ff, 9, 0.35, 0.7); this.fx.shockwave(P.pos.clone().setY(P.pos.y + 0.2), 0xe8e2d0, 6); }
+    this.burst(c, P, 14, 7); whooshSound(fire); if (P.isPlayer) { P.fovKick = (P.fovKick || 0) + 6; this.cam.shake?.(0.1); }
+    this.counterWin = DODGE.slowT; this.onDodge?.(P, s);
+    this.stats.hits.push({ t: this.t, kind: 'dodge', amount: 0, dir: s, target: E.key });
+    return true;
+  }
+  dodgeStep(dt, P) { // strafe around the target at a constant radius; flame / wind trail
+    const d = P.dodge; if (!d) return; d.t += dt;
+    if (P.ko || P.ragdoll || P.grabbedBy || P.legGrabbedBy || d.t >= d.dur) { P.vel.multiplyScalar(0.15); P.dodge = null; return; }
+    const to = t1.copy(d.tgt.pos).sub(P.pos).setY(0), cur = Math.max(0.5, to.length()); to.divideScalar(cur);
+    d.side.set(-to.z, 0, to.x).multiplyScalar(d.s);
+    d.v.copy(d.side).multiplyScalar(DODGE.dist / DODGE.dur).addScaledVector(to, clamp((cur - d.r) * 10, -20, 20));
+    const c = this.chest(P, t2), fire = P.def.style === 'fire';
+    for (let i = 0; i < 4; i++) (fire ? this.fx.fire : this.fx.spark).emit(c, t3.copy(d.side).multiplyScalar(-6 - Math.random() * 8).add(t4.set((Math.random() - .5) * 3, (Math.random() - .5) * 3, (Math.random() - .5) * 3)), 0.3 + Math.random() * 0.3, fire ? this.cFire0 : this.cGold0, fire ? this.cFire1 : this.cGold1);
   }
   updateReticle(dt, E) {
     const r = this.reticle, cam = this.cam.cam;
@@ -343,6 +383,7 @@ export class Combat {
     if (!Array.isArray(enemies)) enemies = [enemies];
     this.enemies = enemies; player.isPlayer = true; for (const e of enemies) { e.isPlayer = false; this.brainOf(e); }
     this.player = player; this.pInp = inp; this.camFwd = camFwd;
+    this.dodgeStep(dt, player);
     const all = [player, ...enemies];
     // recovery backflip: double-tap jump while tumbling (player only, never the AI)
     if (inp && inp.jumpPressed && player.ragdoll && !player.ko && !player.grabbedBy) {
@@ -860,6 +901,7 @@ export class Combat {
     const ca = this.chest(a, t1), cb = this.chest(b, t2), to = t3.copy(cb).sub(ca); const d = to.length();
     const reach = 3.2 + a.def.height * 0.3;
     if (b.ko || d > reach) return false;
+    if (b.dodgeUntil > this.t && b.invulnT > 0) { if (!a.action?.dodgeLogged) { if (a.action) a.action.dodgeLogged = true; this.stats.hits.push({ t: this.t, kind: 'dodged', amount: 0, target: b.key, attacker: a.key }); } return false; } // dodging: whiff
     to.normalize(); if (to.dot(a.aim) < 0.25 && d > 2.2) return false;
     const rel = t4.copy(a.vel).sub(b.vel).dot(to);
     const act = a.action; // a dash punch: count ~30% of the dash plus the momentum you already had (not the full 170 m/s ram)
@@ -869,7 +911,9 @@ export class Combat {
     const dmg = this.damage(b, 9 + 0.24 * sp + (L ? L.dmgBonus : 0), a, 'punch', { speed: sp, lunge: !!L });
     this.punchSfx(L ? 1 : clamp(sp / 160, 0.2, 0.9), a, b);
     const dir = this.punchDir(a, to);
-    if (L) this.knockback(b, dir, L.kb + L.kbSpeed * sp, 0, true, L.spin); else this.knockback(b, dir, 48 + 0.5 * sp, 0, true, 10);
+    const cw = a === this.player && this.counterWin > 0 ? DODGE.bonus : 1; // dodge counter window: a little extra knockback
+    if (cw > 1) this.stats.hits.push({ t: this.t, kind: 'dodgeCounter', amount: 0, target: b.key, attacker: a.key });
+    if (L) this.knockback(b, dir, (L.kb + L.kbSpeed * sp) * cw, 0, true, L.spin); else this.knockback(b, dir, (48 + 0.5 * sp) * cw, 0, true, 10);
     if (dir.y < -0.3) { b.ragdoll.punchedDown = true; this.stats.hits.push({ t: this.t, kind: 'punchDown', amount: 0, vy: b.vel.y, target: b.key, attacker: a.key }); }
     const hp = cb.clone().addScaledVector(to, -0.4);
     if (L) { // Superman punch impact: oriented shock ring + ground ring, big flash, debris burst, shake, FOV punch

@@ -1144,6 +1144,8 @@ export class Hero {
       act.dash.used = Math.min(act.dash.speed, act.dash.cap); this.vel.copy(this.aim).multiplyScalar(act.dash.used);
       if (this.state === 'ground') this.vel.y = 0;
     }
+    // lock-on dodge (combat.startDodge / dodgeStep): a flat, very fast sidestep around the target, on the ground or in the air
+    if (this.dodge && this.dodge.v) { this.vel.copy(this.dodge.v); this.vel.y = 0; }
     // integrate with substeps for robust collisions
     const steps = Math.max(1, Math.ceil(this.vel.length() * dt / 0.8));
     let floor = 0;

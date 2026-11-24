@@ -14,7 +14,7 @@ import { Effects } from './effects.js';
 import { ThirdPersonCamera } from './camera.js';
 import { HUD } from './hud.js';
 import { QualityManager } from './quality.js';
-import { Combat } from './combat.js';
+import { Combat, DODGE } from './combat.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: /shot/.test(location.search) });
 renderer.setSize(innerWidth, innerHeight);
@@ -172,7 +172,7 @@ function switchHero() {
   for (const h of [a, b]) { h.action = null; h.endSuper(); h.endSprint(); h.landT = 0; h.flip = null; }
   b.pos.copy(a.pos); b.vel.copy(a.vel); b.yaw = a.yaw; b.state = a.state; b.charge = 0; b.flyBlend = a.flyBlend; b.hp = a.hp; b.ko = a.ko; b.koT = a.koT;
   b.ragdoll = a.ragdoll; if (!b.ragdoll) b.rig.body.rotation.set(0, 0, 0);
-  a.ragdoll = null; a.rig.body.rotation.set(0, 0, 0); a.silence?.(); a.setVisible(false); b.setVisible(true);
+  a.ragdoll = null; a.dodge = null; a.rig.body.rotation.set(0, 0, 0); a.silence?.(); a.setVisible(false); b.setVisible(true);
   idx ^= 1; b.isPlayer = true; a.isPlayer = true;
   hud.say(`You: ${heroes[idx].def.name}`);
 }
@@ -181,13 +181,16 @@ const free = h => !h.ragdoll && !h.grabbedBy && !h.slammedBy && !h.legGrabbedBy;
 // Y: extreme slow motion for the world (villains, their attacks, projectiles, particles, debris, traffic); the hero
 // you play and the camera keep real time. Eased in/out over ~0.3 s. While a villain holds you, Y is the counter instead.
 const SLOWMO = { rate: 0.1, ease: 9 };
-const slow = { on: false, rate: 1, toggles: 0, heldT: 0 };
+const slow = { on: false, rate: 1, toggles: 0, heldT: 0, byDodge: false, dodgeT: 0 };
+// lock-on dodge: world slow motion for a short counter window (Y slow-mo already on: it just stays on)
+combat.onDodge = () => { if (slow.on && !slow.byDodge) return; slow.byDodge = true; slow.dodgeT = DODGE.slowT; if (!slow.on) { slow.on = true; slow.toggles++; slowmoSound(true); hud.say('Dodge! Counter'); } };
 function setSlowmo(on) { if (slow.on === on) return; slow.on = on; slow.toggles++; slowmoSound(on); hud.say(on ? 'Slow motion' : 'Normal speed'); }
 function canToggleSlowmo(P, dt) { // not while held / thrown, nor for 0.6 s after a hold ends (a late counter press shouldn't flip time)
   if (P.grabbedBy || P.legGrabbedBy || P.slammedBy || P.ragdoll || P.action?.type === 'counter') { slow.heldT = 0.6; return false; }
   return (slow.heldT = Math.max(0, slow.heldT - dt)) <= 0;
 }
 function stepSlowmo(dt) { // ease the world clock in log space so 1 -> 0.1 feels even
+  if (slow.byDodge) { slow.dodgeT -= dt; if (slow.dodgeT <= 0) { slow.byDodge = false; if (slow.on) { slow.on = false; slow.toggles++; slowmoSound(false); } } }
   const target = slow.on ? SLOWMO.rate : 1, k = 1 - Math.exp(-dt * SLOWMO.ease);
   slow.rate = Math.exp(Math.log(slow.rate) + (Math.log(target) - Math.log(slow.rate)) * k);
   if (Math.abs(slow.rate - target) < 0.002) slow.rate = target;
@@ -195,7 +198,7 @@ function stepSlowmo(dt) { // ease the world clock in log space so 1 -> 0.1 feels
 }
 function combatFrame(dt, inp) {
   const P = heroes[idx];
-  if (canToggleSlowmo(P, dt) && inp?.yPressed) setSlowmo(!slow.on); // (grabbed: combat.update turns Y into the counter)
+  if (canToggleSlowmo(P, dt) && inp?.yPressed) { if (slow.byDodge) slow.byDodge = false; else setSlowmo(!slow.on); } // Y during a dodge window: keep the slow motion on // (grabbed: combat.update turns Y into the counter)
   stepSlowmo(dt); const wdt = dt * slow.rate; // world time
   if (free(P)) P.update(dt, P.ko ? NOINP : inp, cam, city);
   setWorldSfx(true);
@@ -240,7 +243,7 @@ function tick(raw) { // one full game frame (tests drive it directly with a fixe
 function step(dt, raw, noRender) {
   const h = heroes[idx]; Hero.audioHero = h; // only the hero you control plays its looping flight sounds
   const wdt = dt * slow.rate; // world time (slow motion); the player's own speed lines stay real time
-  fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120) || (h.superSprint && h.state === 'ground' && Math.hypot(h.vel.x, h.vel.z) > 30), h.def.style === 'fire');
+  fx.speedLines(dt, h.pos, h.vel, (h.superSpeed && h.state === 'fly') || !!h.action?.dash || (h.action?.type === 'tackle' && h.speed > 120) || (h.superSprint && h.state === 'ground' && Math.hypot(h.vel.x, h.vel.z) > 30) || !!h.dodge, h.def.style === 'fire');
   fx.update(wdt); traffic.update(wdt);
   world.update(wdt, camera, h.pos);
   city.update(camera.position, view);
