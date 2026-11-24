@@ -662,6 +662,16 @@ export class Hero {
     sonicBoomSound(fire);
   }
   endSuper() { this.superSpeed = false; this.superIdle = 0; }
+  // impact boom (flying ram contact / tackle driven out of the choke hold): the sonic-boom rings + vapour cone + boom
+  // (Centurion) or the flame burst + fireball + whoomp (Tiger), without the super-speed kick
+  impactBoom(dir) {
+    const fire = this.def.style === 'fire'; dir = dir && dir.lengthSq() > 1e-6 ? dir.clone().normalize() : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    const p = this.pos.clone().add(new THREE.Vector3(0, 0.9, 0)).addScaledVector(dir, 0.8);
+    this.impactBooms = (this.impactBooms || 0) + 1; this.boomKick = 1; this.jetKick = 1;
+    if (fire) { this.fireBurst(this.pos, 110, 28); this.fx.fireExplosion?.(p, dir, this.pos); fireBoomSound(); }
+    else this.fx.sonicBoom(p, dir, { fire: false, follow: this.pos });
+    sonicBoomSound(fire); Hero.onCrash?.(this.pos, this.isPlayer ? 0.8 : 0.5);
+  }
   // villains: the same shockwave ring + vapour cone + boom when they kick into boost flight (no super speed: gameplay unchanged);
   // the sound is attenuated by the distance to the camera
   villainBoom() {
@@ -1079,7 +1089,7 @@ export class Hero {
   update(dt, inp, cam, city) {
     const d = this.mv, fire = d.style === 'fire'; this.t += dt;
     const stun = this.knockT > 0; if (stun) { this.knockT -= dt; inp = NO_INP; }
-    else if (this.grabbing || this.action?.type === 'counter') inp = NO_INP; // counter: scripted; choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
+    else if ((this.grabbing && !this.action?.ram) || this.action?.type === 'counter') inp = NO_INP; // counter: scripted; choke hold / drive: the stick and B pick grab options instead (combat.chokeStep)
     const fwd = cam.flatForward, right = cam.right;
     const wish = V().addScaledVector(fwd, inp.moveY).addScaledVector(right, inp.moveX);
     const prevYaw = this.yaw;
@@ -1132,7 +1142,7 @@ export class Hero {
       if (this.state !== 'fly') this.state = 'fly';
       this.vel.multiplyScalar(Math.exp(-dt * 7));
       const fl = city.heightAt(this.pos.x, this.pos.z, 0.5); if (this.pos.y < fl + 1.0) this.vel.y = Math.max(this.vel.y, (fl + 1.0 - this.pos.y) * 4);
-    } else if (act && act.type === 'tackle' && !stun) {
+    } else if (act && act.type === 'tackle' && !act.ram && !stun) { // (a flying ram: you keep flying it yourself)
       if (this.state !== 'fly') { this.state = 'fly'; if (this.vel.y < 4) this.vel.y = 4; }
       const pg = this.isPlayer === true && !this.grabbing, spd = this.grabbing ? act.carrySpeed : d.tackleSpeed * (pg ? PLAYER_GRAB.speed : 1);
       const dir = this.grabbing ? act.carryDir : this.aim;

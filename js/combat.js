@@ -18,6 +18,10 @@ export const LOCKSW = { dead: 0.3, flick: 0.72, cd: 0.35, ease: 0.6 }; // (now t
 // while locked on: a very fast sidestep around the target (`dist` m in `dur` s) with i-frames (`iframes` s: punches and grabs
 // miss, villain tackles in flight lose their homing), a wind (Centurion) / flame (Tiger) burst, and world slow motion for a
 // `slowT` s real-time counter window (main.js); hits landed in that window knock back `bonus` x harder.
+// flying ram (Ben): fly into a villain at full flight speed (>= minSpeed) without pressing grab: impact boom, and they're
+// carried ahead of your chest along your flight (no hand grip) until you slow down (< stopK x the impact speed), turn
+// more than ~turnDeg away, hit something (wall smash) or maxT runs out; then they're flung on along the carry
+export const RAM = { minSpeed: 80, r: 2.4, stopK: 0.45, turnDot: 0.64, maxT: 1.5, minT: 0.1 };
 export const DODGE = { centre: 0.25, flick: 0.8, window: 0.12, cd: 0.6, dist: 7, dur: 0.15, iframes: 0.3, slowT: 1.75, bonus: 1.2 };
 // choke grab, A: super-fast face-first slam into the ground. Lift `lift` m, then dive at base speed accelerating at `accel`
 // (impact speed = sqrt(base^2 + 2*accel*height) + carried speed); crater / dust / damage scale with that momentum.
@@ -420,6 +424,7 @@ export class Combat {
       }
     }
     // the player's move resolves against its target, or (untargeted) the nearest villain; each villain only fights the player
+    this.ramCheck(dt, player, enemies);
     setWorldSfx(false); if (player.action) this.actionStep(dt, player, this.foeFor(player));
     setWorldSfx(true); for (const e of enemies) this.actionStep(wdt, e, player);
     this.updateProjectiles(wdt, all);
@@ -461,6 +466,16 @@ export class Combat {
       if (act.t >= act.dur && !a.grabbing) a.action = null;
       return;
     }
+    if (act.type === 'tackle' && act.ram) { // flying ram carry (see RAM): steer it yourself; ends on a stop / sharp turn / timeout
+      if (!a.grabbing) { a.action = null; return; }
+      act.grabT += dt; const sp = a.vel.length(); if (sp > 1) act.carryDir.copy(a.vel).divideScalar(sp);
+      const turned = act.carryDir.dot(act.ramDir0) < RAM.turnDot;
+      const wall = sp < act.ramSpeed * RAM.stopK && (this.wallHit(a.pos.clone().addScaledVector(act.ramDir0, 1.4).setY(a.pos.y + 0.9), 0.9) || this.wallHit(a.grabbing.pos.clone().addScaledVector(act.ramDir0, 1.2).setY(a.grabbing.pos.y + 0.9), 0.9));
+      if (wall) { this.smash(a, a.grabbing, wall.normal, wall.point.setY(a.grabbing.pos.y + 1), act.ramSpeed); return; } // carried into a building: wall smash
+      if (act.grabT > RAM.minT && (sp < act.ramSpeed * RAM.stopK || turned || a.state !== 'fly')) this.ramRelease(a, turned ? 'turn' : 'stop');
+      else if (act.grabT > RAM.maxT) this.ramRelease(a, 'time');
+      return;
+    }
     if (act.type === 'tackle') {
       // homing: steer the drive toward a locked target in 3D
       if (!a.grabbing && act.target && !act.target.ko && !act.target.grabbedBy) {
@@ -498,6 +513,37 @@ export class Combat {
       }
     }
     if (act.t >= act.dur && !a.grabbing) a.action = null;
+  }
+  // ---------- flying ram ----------
+  ramCheck(dt, P, enemies) {
+    this.ramCd = Math.max(0, (this.ramCd || 0) - dt);
+    if (this.ramCd > 0 || P.state !== 'fly' || !this.canAct(P) || P.grabbing || P.legGrabbedBy || P.dodge) return;
+    const sp = P.vel.length(); if (sp < RAM.minSpeed) return;
+    for (const v of enemies) {
+      if (v.ko || v.grabbedBy || v.slammedBy || v.invulnT > 0 || v.legGrabbing) continue;
+      const cb = this.chest(v, t2), c1 = this.chest(P, t1), rel = t3.copy(P.vel).sub(v.vel).multiplyScalar(dt), L = rel.length(), c0 = t4.copy(c1).sub(rel);
+      let d; if (L > 1e-4) { const s = clamp(t1.copy(cb).sub(c0).dot(rel) / (L * L), 0, 1); d = c0.addScaledVector(rel, s).distanceTo(cb); } else d = c1.distanceTo(cb);
+      if (d < RAM.r) { this.startRam(P, v, sp); return; }
+    }
+  }
+  startRam(P, v, sp) {
+    const dir = P.vel.clone().normalize();
+    P.action = { type: 'tackle', t: 0, dur: MOVES.tackle.dur, done: false, target: v, ram: true, mode: 'drive', grabT: 0, carryDir: dir.clone(), ramDir0: dir.clone(), carrySpeed: sp, ramSpeed: sp };
+    if (v.ragdoll) { v.ragBlend = { q: v.rig.body.quaternion.clone(), y: v.rig.body.position.y, t: 0, dur: 0.25 }; v.ragdoll = null; }
+    P.grabbing = v; v.grabbedBy = P; v.action = null; v.knockT = 0; v.state = 'air'; v.endSuper?.();
+    P.impactBoom?.(dir); this.shakeNear(P.pos, 0.6);
+    this.stats.hits.push({ t: this.t, kind: 'ram', amount: 0, speed: sp, target: v.key, attacker: P.key });
+    this.damage(v, 6 + 0.08 * sp, P, 'ram', { speed: sp });
+    if (v.ko) { this.releaseGrab(P); P.action = null; v.vel.copy(dir).multiplyScalar(sp * 0.9); this.startRagdoll(v, 12); }
+  }
+  ramRelease(a, why) {
+    const act = a.action, v = a.grabbing; if (!v) { a.action = null; return; }
+    const dir = (why === 'turn' ? act.ramDir0 : act.carryDir).clone(), speed = Math.max(act.ramSpeed * 0.8, a.vel.length());
+    this.releaseGrab(a); a.action = null; if (a === this.player) this.ramCd = 0.8; // (no instant re-ram of the same body)
+    this.damage(v, 3 + 0.04 * speed, a, 'throw', { speed });
+    v.vel.copy(dir).multiplyScalar(speed * 0.85); this.startRagdoll(v, 10);
+    this.fx.shockwaveOriented?.(this.chest(v, V()), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 12, 0.5, 0.6);
+    this.stats.hits.push({ t: this.t, kind: 'ramRelease', amount: 0, why, target: v.key, attacker: a.key });
   }
   grab(a, b) {
     if (b.invulnT > 0 || b.slammedBy) return;
@@ -565,6 +611,7 @@ export class Combat {
         const dir = isP ? this.camFwd.clone() : this.aiDriveDir(a);
         if (dir.y < -0.3) dir.y = -0.3; dir.normalize();
         act.mode = 'drive'; act.carryDir = dir; a.aim.copy(dir); act.carrySpeed = a.mv.tackleSpeed * 1.25; act.grabT = 0;
+        a.impactBoom?.(dir); this.stats.hits.push({ t: this.t, kind: 'driveBoom', amount: 0, attacker: a.key }); // tackle out of the grab: sonic / flame boom
         a.vel.copy(dir).multiplyScalar(act.carrySpeed * 0.6);
         this.fx.shockwaveOriented?.(this.chest(a, V()).addScaledVector(dir, -0.6), dir, a.def.style === 'fire' ? 0xff8a30 : 0xe8e2d0, 14, 0.45, 0.7);
         if (a.def.style === 'fire') a.fireBurst(a.pos, 60, 16); else this.burst(this.chest(a, V()), a, 30, 10);
